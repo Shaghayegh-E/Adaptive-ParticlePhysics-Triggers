@@ -1,9 +1,9 @@
 # Towards a Self-Driving Trigger at the LHC: Adaptive Response in Real Time
 
 ## Repository Developers
-- [Shaghayegh Emami](shghygh@umich.edu)
-- [Giovanna Salvi](giovanna.salvi@cern.ch)
-- [Zixin Ding](zixin@uchicago.edu)
+- [Shaghayegh Emami: shghygh@umich.edu]
+- [Giovanna Salvi: giovanna.salvi@cern.ch]
+- [Zixin Ding: zixin@uchicago.edu]
 
   
 ## Datasets
