@@ -118,11 +118,6 @@ Adaptive-ParticlePhysics-Triggers/
 │   ├── summary.py
 │   └── metrics.py
 |
-├── realdata/                # Real Data Results (pure background samples)
-│   ├── realdata_io.py
-│   ├── realdata_plots.py
-│   ├── realdata_simulation.py
-│   └── realdata_singletrigger.py
 │  
 ├── outputs/                  # Generated plots & results (create your own outputs folder to store the plots)
 ├── controllers.py                  
