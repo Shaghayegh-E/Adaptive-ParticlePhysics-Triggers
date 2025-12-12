@@ -117,7 +117,7 @@ Adaptive-ParticlePhysics-Triggers/
 │   ├── mc_singletrigger.py
 │   ├── summary.py
 │   └── metrics.py
-|
+│── RL/ # Running RL algorithms 
 │  
 ├── outputs/                  # Generated plots & results (create your own outputs folder to store the plots)
 ├── controllers.py                  
@@ -135,7 +135,7 @@ python3 -m SampleProcessing.ae.experiment_testae --dims=4
 ```
 python3 -m SampleProcessing.derived_info.build_trigger_food
 ```
-## Step 3 Choose different agents for Trigger Control
+## Step 3 Choose different agents for Trigger Control (Control-only framework)
 ### Multi Trigger Control Framework Case 1/2/3
 ```
 python3 -m Control.mc_multipath --agent v1
