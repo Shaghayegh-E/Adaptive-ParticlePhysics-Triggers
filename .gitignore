@@ -1,0 +1,57 @@
+# -----------------------------
+# JFTI-Autonomous-Trigger .gitignore
+# -----------------------------
+
+# === Datasets ===
+# Ignore all local data files (Zenodo-hosted)
+Data/*.h5
+Data/**/*.h5
+# === Outputs / Plots ===
+outputs/
+runs/
+results/
+figs/
+*.pdf
+*.png
+
+# === Temporary / Cache ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.tmp
+*.log
+*.swp
+.DS_Store
+Thumbs.db
+
+# === Python / Conda ===
+.env
+.venv
+venv/
+env/
+*.egg-info/
+*.egg
+*.hdf5
+*.h5
+*.ckpt
+
+# === Jupyter / Notebooks ===
+.ipynb_checkpoints/
+*.ipynb
+
+# === IDE / Editor ===
+.vscode/
+.idea/
+*.code-workspace
+
+# === System / Mac ===
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Autoencoder models
+*.keras
+
+# Large numpy results
+*.npz
