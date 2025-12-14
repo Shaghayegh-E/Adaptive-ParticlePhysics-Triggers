@@ -6,6 +6,7 @@ from keras.layers import Dense, Flatten, Reshape, InputLayer
 from keras.models import Sequential
 import argparse
 import numpy as np
+import random
 from sklearn.model_selection import train_test_split
 import tensorflow as tf
 from tensorflow import keras
@@ -40,7 +41,9 @@ DEFAULT_MODEL_DIR = PKG_ROOT / "models"           # .../SampleProcessing/models
 def set_all_seeds(seed: int):
     """Helpers to set all random seeds for reproducibility."""
     np.random.seed(seed)
+    random.seed(seed)
     tf.random.set_seed(seed)
+
 
 
 def jets_npv_to_X(jets: np.ndarray, npv: np.ndarray) -> np.ndarray:
@@ -131,10 +134,10 @@ def run_experiment(args):
 
     # ---- Train/test split for background ----
     # Keep semantics:
-    #  - RealData: HT baseline is percentile of HT_test (matches your legacy function)
-    #  - MC:       HT baseline is percentile of HT_bkg full (matches your MC block)
+    #  - RealData: HT baseline is percentile of HT_test 
+    #  - MC:       HT baseline is percentile of HT_bkg full 
     X_tr, X_te, HT_tr, HT_te = train_test_split(
-        X_bkg, HT_bkg, test_size=0.5, random_state=42
+        X_bkg, HT_bkg, test_size=0.2, random_state=40
     )
 
     img_shape = X_tr.shape[1:]  # (25,)
