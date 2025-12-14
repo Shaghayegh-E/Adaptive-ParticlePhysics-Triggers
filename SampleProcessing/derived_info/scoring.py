@@ -12,6 +12,14 @@ def load_autoencoders(paths: Tuple[str, str]):
     ae04 = load_model(paths[1])
     return ae01, ae04
 
+def load_autoencoder(path: Tuple[str, str]):
+    """
+    V2 updated version: Return a tuple of loaded keras models for (ae02).
+    """
+    ae02 = load_model(path)
+
+    return ae02
+
 def calculate_batch_loss(autoencoder, images: np.ndarray) -> np.ndarray:
     """
     Per-event MSE between input and recon (averaged over axes 1,2).

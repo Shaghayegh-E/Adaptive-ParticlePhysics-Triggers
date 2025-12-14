@@ -75,8 +75,8 @@ def train_one_dim(X_train, X_val, img_shape, code_dim, loss_name="mse"):
     ae.compile(optimizer="adamax", loss=loss)
 
     es = keras.callbacks.EarlyStopping(
-        monitor="val_loss", mode="min",
-        patience=3, verbose=0, restore_best_weights=True
+        monitor="val_loss",
+        patience=3, restore_best_weights=True
     )
     ae.fit(
         X_train, X_train,
