@@ -40,7 +40,7 @@ import hdf5plugin  # noqa: F401
 from pathlib import Path
 from controllers import PD_controller1, PD_controller2
 from triggers import Sing_Trigger
-from RL.utils import cummean, rel_to_t0, add_cms_header, save_pdf_png, plot_rate_with_tolerance
+from RL.utils import cummean, rel_to_t0, add_cms_header, plot_rate_with_tolerance, save_png #save_pdf_png,
 from RL.dqn_agent import DQNAgent, make_obs, shield_delta, compute_reward, DQNConfig
 
 # ------------------------- reproducibility -------------------------
@@ -250,7 +250,8 @@ def main():
     ap.add_argument("--input", default="Data/Matched_data_2016_dim2.h5",
                     help="Matched_data_*.h5 (data) or Trigger_food_*.h5 (MC)")
     ap.add_argument("--outdir", default="outputs/demo_sing_dqn_separate", help="output dir")
-    ap.add_argument("--cms-run-label", default="Run 283408")
+    ap.add_argument("--control", default="Data", choices=["MC", "RealData"],
+                    help="Control type: MC or RealData")
 
     ap.add_argument("--chunk-size", type=int, default=20000,
                     help="Chunk size (Matched_data default 20000; MC default maybe 50000).")
@@ -280,6 +281,10 @@ def main():
                 help="High percentile for AS cut range.")
 
     args = ap.parse_args()
+    if args.control == "MC":
+        run_label = "MC"
+    else:
+        run_label = "283408"
     if args.print_keys:
         print_h5_tree(args.input, max_items=args.print_keys_max)
         raise SystemExit(0)
@@ -624,14 +629,14 @@ def main():
     plot_rate_with_tolerance(
         time, R1_ht, R2_ht, R3_ht,
         outbase=outdir / "bht_rate_pidData_dqn",
-        run_label=args.cms_run_label,
+        run_label=run_label,
         legend_title="HT Trigger",
         ylim=(0, 200),
         tol_upper=upper_tol_khz,
         tol_lower=lower_tol_khz,
         # pass your functions from utils import
         add_cms_header=add_cms_header,
-        save_pdf_png=save_pdf_png,
+        save_pdf_png=save_png,
     )
 
     # ------------------------- common styles -------------------------
@@ -653,8 +658,8 @@ def main():
     ax.set_ylabel("Ht_cut [GeV]", loc="center")
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.legend(title="HT Cut", fontsize=14, frameon=True, loc="best")
-    add_cms_header(fig, run_label=args.cms_run_label)
-    save_pdf_png(fig, str(outdir / "ht_cut_pidData_dqn"))
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(outdir / "ht_cut_pidData_dqn"))
     plt.close(fig)
 
     # (3) HT cumulative eff (relative to t0)
@@ -684,8 +689,8 @@ def main():
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.set_ylim(0.85, 1.5)
     ax.legend(title="HT Trigger", fontsize=14, frameon=True, loc="best")
-    add_cms_header(fig, run_label=args.cms_run_label)
-    save_pdf_png(fig, str(outdir / "sht_rate_pidData2data_dqn"))
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(outdir / "sht_rate_pidData2data_dqn"))
     plt.close(fig)
 
     # (4) HT local eff (relative to t0)
@@ -707,8 +712,8 @@ def main():
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.set_ylim(0.0, 1.6)
     ax.legend(title="HT Trigger", fontsize=14, frameon=True, loc="best")
-    add_cms_header(fig, run_label=args.cms_run_label)
-    save_pdf_png(fig, str(outdir / "L_sht_rate_pidData2data_dqn"))
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(outdir / "L_sht_rate_pidData2data_dqn"))
     plt.close(fig)
 
     # (5) HT loss
@@ -719,8 +724,8 @@ def main():
         ax.set_xlabel("Gradient step")
         ax.set_ylabel("Loss")
         ax.grid(True, linestyle="--", alpha=0.5)
-        add_cms_header(fig, run_label=args.cms_run_label)
-        save_pdf_png(fig, str(outdir / "dqn_loss_ht"))
+        add_cms_header(fig, run_label=run_label)
+        save_png(fig, str(outdir / "dqn_loss_ht"))
         plt.close(fig)
 
     # =========================================================
@@ -730,7 +735,7 @@ def main():
     plot_rate_with_tolerance(
         time_as, R1_as, R2_as, R3_as,
         outbase=outdir / "bas_rate_pidData_dqn",
-        run_label=args.cms_run_label,
+        run_label=run_label,
         legend_title="AD Trigger",
         ylim=(60, 200),
         tol_upper=upper_tol_khz,
@@ -739,7 +744,7 @@ def main():
         pd_style=dict(color="mediumblue", linestyle="solid", linewidth=2.5),
         dqn_style=dict(color="tab:purple", linestyle="solid", linewidth=2.5),
         add_cms_header=add_cms_header,
-        save_pdf_png=save_pdf_png,
+        save_pdf_png=save_png,
     )
 
     # (A2) AS cut evolution
@@ -751,8 +756,8 @@ def main():
     ax.set_ylabel("AS_cut", loc="center")
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.legend(title="AD Cut", fontsize=14, frameon=True, loc="best")
-    add_cms_header(fig, run_label=args.cms_run_label)
-    save_pdf_png(fig, str(outdir / "as_cut_pidData_dqn"))
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(outdir / "as_cut_pidData_dqn"))
     plt.close(fig)
 
     # (A3) AD cumulative eff (relative to t0)
@@ -784,8 +789,8 @@ def main():
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.set_ylim(0.98, 1.5)
     ax.legend(title="AD Trigger", fontsize=14, frameon=True, loc="best")
-    add_cms_header(fig, run_label=args.cms_run_label)
-    save_pdf_png(fig, str(outdir / "sas_rate_pidData2data_dqn"))
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(outdir / "sas_rate_pidData2data_dqn"))
     plt.close(fig)
 
     # (A4) AD local eff (relative to t0)
@@ -808,8 +813,8 @@ def main():
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.set_ylim(0.9, 1.7)
     ax.legend(title="AD Trigger", fontsize=14, frameon=True, loc="best")
-    add_cms_header(fig, run_label=args.cms_run_label)
-    save_pdf_png(fig, str(outdir / "L_sas_rate_pidData2data_dqn"))
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(outdir / "L_sas_rate_pidData2data_dqn"))
     plt.close(fig)
 
     # (A5) AS loss
@@ -820,8 +825,8 @@ def main():
         ax.set_xlabel("Gradient step")
         ax.set_ylabel("Loss")
         ax.grid(True, linestyle="--", alpha=0.5)
-        add_cms_header(fig, run_label=args.cms_run_label)
-        save_pdf_png(fig, str(outdir / "dqn_loss_as"))
+        add_cms_header(fig, run_label=run_label)
+        save_png(fig, str(outdir / "dqn_loss_as"))
         plt.close(fig)
 
     print("\nSaved to:", outdir)

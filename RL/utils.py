@@ -118,3 +118,11 @@ def plot_rate_with_tolerance(
         save_pdf_png(fig, str(outbase), dpi_png=dpi_png)
 
     plt.close(fig)
+
+
+
+def save_png(fig, basepath, dpi_png=300):
+    """Save figure as PNG only. basepath: path without extension."""
+    p = Path(basepath)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(p.with_suffix(".png")), bbox_inches="tight", dpi=dpi_png)
