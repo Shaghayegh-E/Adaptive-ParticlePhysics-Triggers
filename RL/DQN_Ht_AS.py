@@ -171,8 +171,6 @@ def main():
 
     HT_DELTAS = np.array([float(x) for x in args.ht_deltas.split(",")], dtype=np.float32)
     HT_STEP = 1.0
-    # AS_DELTAS = np.array([-3, -1.5, -1, 0.0, 1, 1.5, 3], dtype=np.float32)
-    # AS_STEP   = float(args.as_step)     # keep 1
     MAX_DELTA_HT = float(np.max(np.abs(HT_DELTAS))) * HT_STEP
 
     AS_DELTAS = np.array([float(x) for x in args.as_deltas.split(",")], dtype=np.float32)
