@@ -125,7 +125,7 @@ pre_r2_1 = 0.0
 pre_r2_4 = 0.0
 
 # Fixed cuts from a reference window
-fixed_Ht_cut  = np.percentile(Bht_tot[200000:210000], 99.75)
+fixed_Ht_cut  = np.percentile(Bht_tot[200000:210000], 99.75) #
 fixed_AS_cut1 = np.percentile(Bas01_tot[200000:210000], 99.75)
 fixed_AS_cut4 = np.percentile(Bas04_tot[200000:210000], 99.75)
 

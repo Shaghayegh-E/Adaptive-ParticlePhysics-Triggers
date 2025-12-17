@@ -14,18 +14,18 @@ We train two independent DQNs:
 Outputs:
 
 HT trigger outputs:
-  - bht_rate_pidData_dqn.pdf/.png          (HT background rate [kHz])
-  - ht_cut_pidData_dqn.pdf/.png            (Ht_cut evolution)
-  - sht_rate_pidData2data_dqn.pdf/.png     (cumulative signal eff, relative to t0)
-  - L_sht_rate_pidData2data_dqn.pdf/.png   (local signal eff, relative to t0)
-  - dqn_loss_ht.pdf/.png                   (HT DQN loss)
+  - bht_rate_pidData_dqn.png          (HT background rate [kHz])
+  - ht_cut_pidData_dqn.png            (Ht_cut evolution)
+  - sht_rate_pidData2data_dqn.png     (cumulative signal eff, relative to t0)
+  - L_sht_rate_pidData2data_dqn.png   (local signal eff, relative to t0)
+  - dqn_loss_ht.png                   (HT DQN loss)
 
 AS trigger outputs:
-  - bas_rate_pidData_dqn.pdf/.png          (AS background rate [kHz])
-  - as_cut_pidData_dqn.pdf/.png            (AS_cut evolution)
-  - sas_rate_pidData2data_dqn.pdf/.png     (cumulative signal eff, relative to t0)
-  - L_sas_rate_pidData2data_dqn.pdf/.png   (local signal eff, relative to t0)
-  - dqn_loss_as.pdf/.png                   (AS DQN loss)
+  - bas_rate_pidData_dqn.png          (AS background rate [kHz])
+  - as_cut_pidData_dqn.png            (AS_cut evolution)
+  - sas_rate_pidData2data_dqn.png     (cumulative signal eff, relative to t0)
+  - L_sas_rate_pidData2data_dqn.png   (local signal eff, relative to t0)
+  - dqn_loss_as.png                   (AS DQN loss)
 
 """
 
@@ -43,7 +43,7 @@ from triggers import Sing_Trigger
 from RL.utils import cummean, rel_to_t0, add_cms_header, plot_rate_with_tolerance, save_png #save_pdf_png,
 from RL.dqn_agent import DQNAgent, make_obs, shield_delta, compute_reward, DQNConfig
 
-# ------------------------- reproducibility -------------------------
+# ------------------------- Fixing seed for reproducibility -------------------------
 SEED = 20251213
 random.seed(SEED)
 np.random.seed(SEED)
@@ -85,7 +85,7 @@ def _first_present(h5_keys, candidates):
 
 def _read_score(h5, prefix: str, dim: int):
     """
-    Your builder writes: f"{prefix}_score{dim:02d}" like mc_bkg_score02 or data_bkg_score02.
+    Trigger_food_MC.h5 or Trigger_food_Data.h5 or Matched_data_2016_dim2.h5 : f"{prefix}_score{dim:02d}" like mc_bkg_score02 or data_bkg_score02.
     """
     d2 = f"{int(dim):02d}"
     for k in (f"{prefix}_score{d2}", f"{prefix}_scores{d2}"):
@@ -125,15 +125,15 @@ def print_h5_tree(path: str, max_items: int | None = None) -> None:
 def read_any_h5(path: str, score_dim_hint: int = 2):
     """
     Unified outputs (same keys as your DQN code expects):
-      Bht, Bnpv, Bas1, Bas2, Bas4
-      Tht, Tnpv, Tas1, Tas2, Tas4
-      Aht, Anpv, Aas1, Aas2, Aas4
+      Bht, Bnpv, Bas2, #background Ht, Npv, anomaly score with dim 2
+      Tht, Tnpv, Tas2, #ttbar Ht, Npv, anomaly score with dim 2
+      Aht, Anpv, Aas2, #aa Ht, Npv, anomaly score with dim 2
       meta['matched_by_index']
 
-    Supported input files (new builder):
-      - Trigger_food_MC.h5          (MC control)
-      - Trigger_food_Data.h5        (RealData control, unpaired)
-      - Matched_data_2016.h5        (RealData paired)
+    Supported input files:
+      - Trigger_food_MC.h5          (MC control) Background Data/MinBias_2.h5 + aa Data/HToAATo4B.h5 + ttbar Data/TT_1.h5
+      - Trigger_food_Data.h5        (RealData control, unpaired) Background Data/data_Run_2016_283408_longest.h5
+      - Matched_data_2016.h5        (RealData paired) Matched_data_2016_dim2.h5
     """
     with h5py.File(path, "r") as h5:
         keys = set(h5.keys())
@@ -149,10 +149,10 @@ def read_any_h5(path: str, score_dim_hint: int = 2):
             Tht  = h5["mc_tt_ht"][:]
             Aht  = h5["mc_aa_ht"][:]
 
-            # note: your builder uses tt_Npv / aa_Npv (not mc_tt_Npv / mc_aa_Npv)
+            # tt_Npv / aa_Npv (not mc_tt_Npv / mc_aa_Npv)
             Tnpv = h5["tt_Npv"][:] if "tt_Npv" in keys else np.zeros_like(Tht, dtype=np.float32)
             Anpv = h5["aa_Npv"][:] if "aa_Npv" in keys else np.zeros_like(Aht, dtype=np.float32)
-
+            # suppose dim = 2
             Bas2 = _read_score(h5, "mc_bkg", hint)
 
             Tas2 = _read_score(h5, "mc_tt",  hint)
@@ -179,9 +179,9 @@ def read_any_h5(path: str, score_dim_hint: int = 2):
             )
 
         # ------------------------------------------------------------
-        # Case B) RealData Trigger_food (unpaired) OR paired Matched_data
-        #   - Paired Matched_data has data_Npv (not data_bkg_Npv)
-        #   - Unpaired Trigger_food_Data has data_bkg_Npv (and also data_tt_Npv / data_aa_Npv)
+        # Case B) RealData Trigger_food_Data (unpaired) OR paired Matched_data_2016_dim2.h5
+        #   - Paired Matched_data has data_Npv not data_bkg_Npv
+        #   - Unpaired Trigger_food_Data has data_bkg_Npv and also data_tt_Npv / data_aa_Npv
         # ------------------------------------------------------------
         has_bkg = ("data_bkg_ht" in keys)
         has_npvs_any = ("data_Npv" in keys) or ("data_bkg_Npv" in keys)
@@ -221,8 +221,8 @@ def read_any_h5(path: str, score_dim_hint: int = 2):
 
 
             # IMPORTANT:
-            # - If file has data_Npv, tt/aa were already matched -> treat as matched_by_index=True
-            # - If file has data_bkg_Npv, it’s unpaired Trigger_food_Data -> matched_by_index=False
+            # - If file has data_Npv, tt/aa were already matched: should start with Matched_data_2016_dim2.h5 -> treat as matched_by_index=True
+            # - If file has data_bkg_Npv, it’s unpaired Trigger_food_Data.h5 -> matched_by_index=False
             matched_by_index = ("data_Npv" in keys)
 
             return dict(
@@ -236,7 +236,7 @@ def read_any_h5(path: str, score_dim_hint: int = 2):
             )
 
         # ------------------------------------------------------------
-        # Fall-through: unknown layout
+        # Fall back: unknown layout
         # ------------------------------------------------------------
         raise SystemExit(
             "[read_any_h5] Unrecognized H5 layout. "
@@ -249,14 +249,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", default="Data/Matched_data_2016_dim2.h5",
                     help="Matched_data_*.h5 (data) or Trigger_food_*.h5 (MC)")
-    ap.add_argument("--outdir", default="outputs/demo_sing_dqn_separate", help="output dir")
+    ap.add_argument("--outdir", default="RL_outputs/demo_sing_dqn_separate", help="output dir")
     ap.add_argument("--control", default="MC", choices=["MC", "RealData"],
                     help="Control type: MC or RealData")
-
-    ap.add_argument("--chunk-size", type=int, default=20000,
-                    help="Chunk size (Matched_data default 20000; MC default maybe 50000).")
-    ap.add_argument("--start-event", type=int, default=200000,
-                    help="Start event index (Matched_data default 200000).")
     ap.add_argument("--score-dim-hint", type=int, default=2,
                     help="If file has only scoreXX, use this dim (e.g. 2 -> score02).")
     ap.add_argument("--as-dim", type=int, default=2, choices=[1, 4, 2],
@@ -267,7 +262,7 @@ def main():
     ap.add_argument("--as-deltas", type=str, default="-2,-1,0,1,2",
                     help="AS DQN delta multipliers.")
     ap.add_argument("--as-step", type=float, default=0.5,
-                    help="AS step: final delta = as_delta * as_step (tune the AS scale).")
+                    help="AS step: final delta or step we make for AS trigger = as_delta * as_step (tune the AS scale).")
     ap.add_argument("--print-keys", action="store_true",
                 help="Print all HDF5 groups/datasets (with shapes/dtypes) and exit.")
     ap.add_argument("--print-keys-max", type=int, default=None,
@@ -300,23 +295,27 @@ def main():
     Aht, Anpv = d["Aht"], d["Anpv"]
 
     # Pick AS dim
-
+    # For now only support dim=2 (score02) in this script
     if args.as_dim == 2:
         Bas, Tas, Aas = d["Bas2"], d["Tas2"], d["Aas2"]
 
     if Bas is None or Tas is None or Aas is None:
-        raise SystemExit("AS arrays missing for requested --as-dim. Try --as-dim 1 and/or --score-dim-hint.")
+        raise SystemExit("AS arrays missing for requested --as-dim. Check your input file.")
 
     N = len(Bht)
-    chunk_size = int(args.chunk_size)
-    start_event = int(args.start_event)
+    if args.control == "MC":
+        chunk_size = 50000
+    else:
+        #real data
+        chunk_size = 20000
+    start_event = chunk_size * 10
 
     # Align start_event to chunk boundary
     start_event = max(0, (start_event // chunk_size) * chunk_size)
     if start_event + chunk_size > N:
         start_event = max(0, ((N - chunk_size) // chunk_size) * chunk_size)
 
-    # Fixed cuts from a reference window (mimic your Data_SingleTrigger.py)
+    # Fixed cuts from a reference window (mimic Data_SingleTrigger.py)
     win_lo = min(start_event, N - 1)
     win_hi = min(start_event + 10000, N)
     if win_hi - win_lo < 1000:
@@ -332,10 +331,6 @@ def main():
     ht_mid = 0.5 * (ht_lo + ht_hi)
     ht_span = max(1.0, ht_hi - ht_lo)
 
-    # as_lo = float(np.percentile(Bas[start_event:], 95.0))
-    # as_hi = float(np.percentile(Bas[start_event:], 99.99))
-    # as_mid = 0.5 * (as_lo + as_hi)
-    # as_span = max(1e-6, as_hi - as_lo)
     ref_as = Bas[win_lo:win_hi]
 
     as_lo = float(np.min(ref_as))
