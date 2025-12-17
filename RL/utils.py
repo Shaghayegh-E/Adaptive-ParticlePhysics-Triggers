@@ -19,9 +19,9 @@ def rel_to_t0(x):
 # ------------------------- plotting helpers -------------------------
 def add_cms_header(fig, left_x=0.13, right_x=0.90, y=0.94, run_label="Run 283408"):
     fig.text(left_x, y, "CMS Open Data",
-             ha="left", va="top", fontweight="bold", fontsize=24)
+             ha="left", va="top", fontweight="bold", fontsize=20)
     fig.text(right_x, y, run_label,
-             ha="right", va="top", fontsize=24)
+             ha="right", va="top", fontsize=20)
 
 def save_pdf_png(fig, basepath, dpi_png=300):
     Path(basepath).parent.mkdir(parents=True, exist_ok=True)

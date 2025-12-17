@@ -739,7 +739,7 @@ def main():
     if losses_ht:
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.plot(np.arange(len(losses_ht)), losses_ht, linewidth=1.5)
-        ax.set_title("HT DQN training loss (SmoothL1)")
+        ax.set_title("HT DQN training loss")
         ax.set_xlabel("Gradient step")
         ax.set_ylabel("Loss")
         ax.grid(True, linestyle="--", alpha=0.5)
@@ -840,7 +840,7 @@ def main():
     if losses_as:
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.plot(np.arange(len(losses_as)), losses_as, linewidth=1.5)
-        ax.set_title("AD DQN training loss (SmoothL1)")
+        ax.set_title("AD DQN training loss")
         ax.set_xlabel("Gradient step")
         ax.set_ylabel("Loss")
         ax.grid(True, linestyle="--", alpha=0.5)
