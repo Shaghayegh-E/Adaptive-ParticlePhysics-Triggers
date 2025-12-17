@@ -40,7 +40,7 @@ import hdf5plugin  # noqa: F401
 from pathlib import Path
 from controllers import PD_controller1, PD_controller2
 from triggers import Sing_Trigger
-from RL.utils import cummean, rel_to_t0, add_cms_header, plot_rate_with_tolerance, save_png #save_pdf_png,
+from RL.utils import cummean, rel_to_t0, add_cms_header, plot_rate_with_tolerance, save_png, print_h5_tree, read_any_h5 #save_pdf_png,
 from RL.dqn_agent import DQNAgent, make_obs, shield_delta, compute_reward, DQNConfig
 
 # ------------------------- Fixing seed for reproducibility -------------------------
@@ -48,201 +48,7 @@ SEED = 20251213
 random.seed(SEED)
 np.random.seed(SEED)
 
-# ------------------------- H5 reading (the unified reader) -------------------------
 
-def _collect_datasets(h5):
-    """Return dict: dataset_path -> h5py.Dataset (supports nested groups)."""
-    dsets = {}
-    def visitor(name, obj):
-        if isinstance(obj, h5py.Dataset):
-            dsets[name] = obj
-    h5.visititems(visitor)
-    return dsets
-
-def _basename(x: str) -> str:
-    return x.split("/")[-1]
-
-def _find_key(keys, candidates):
-    """
-    Find a dataset key by trying:
-      1) exact match
-      2) basename match (for nested datasets)
-    """
-    for c in candidates:
-        if c in keys:
-            return c
-    # basename match
-    for c in candidates:
-        for k in keys:
-            if _basename(k) == c:
-                return k
-    return None
-def _first_present(h5_keys, candidates):
-    for k in candidates:
-        if k in h5_keys:
-            return k
-    return None
-
-def _read_score(h5, prefix: str, dim: int):
-    """
-    Trigger_food_MC.h5 or Trigger_food_Data.h5 or Matched_data_2016_dim2.h5 : f"{prefix}_score{dim:02d}" like mc_bkg_score02 or data_bkg_score02.
-    """
-    d2 = f"{int(dim):02d}"
-    for k in (f"{prefix}_score{d2}", f"{prefix}_scores{d2}"):
-        if k in h5:
-            return h5[k][:]
-    return None
-
-def print_h5_tree(path: str, max_items: int | None = None) -> None:
-    """
-    Print ALL keys in an HDF5 file, including nested groups/datasets.
-    Shows dataset shape + dtype. Use max_items to truncate.
-    """
-    print(f"\n[H5] Inspect: {path}")
-    n = 0
-
-    def visitor(name, obj):
-        nonlocal n
-        if max_items is not None and n >= max_items:
-            return
-        if isinstance(obj, h5py.Group):
-            print(f"  [G] {name}/")
-        elif isinstance(obj, h5py.Dataset):
-            print(f"  [D] {name}  shape={obj.shape}  dtype={obj.dtype}")
-        else:
-            print(f"  [?] {name}  type={type(obj)}")
-        n += 1
-
-    with h5py.File(path, "r") as h5:
-        # root keys (top-level)
-        print("  Top-level:", list(h5.keys()))
-        h5.visititems(visitor)
-
-    if max_items is not None:
-        print(f"  ... printed up to max_items={max_items}")
-    print("")
-
-def read_any_h5(path: str, score_dim_hint: int = 2):
-    """
-    Unified outputs (same keys as your DQN code expects):
-      Bht, Bnpv, Bas2, #background Ht, Npv, anomaly score with dim 2
-      Tht, Tnpv, Tas2, #ttbar Ht, Npv, anomaly score with dim 2
-      Aht, Anpv, Aas2, #aa Ht, Npv, anomaly score with dim 2
-      meta['matched_by_index']
-
-    Supported input files:
-      - Trigger_food_MC.h5          (MC control) Background Data/MinBias_2.h5 + aa Data/HToAATo4B.h5 + ttbar Data/TT_1.h5
-      - Trigger_food_Data.h5        (RealData control, unpaired) Background Data/data_Run_2016_283408_longest.h5
-      - Matched_data_2016.h5        (RealData paired) Matched_data_2016_dim2.h5
-    """
-    with h5py.File(path, "r") as h5:
-        keys = set(h5.keys())
-        hint = int(score_dim_hint)
-
-        # ------------------------------------------------------------
-        # Case A) MC Trigger_food (control="MC")
-        # ------------------------------------------------------------
-        if ("mc_bkg_ht" in keys) and ("mc_bkg_Npv" in keys):
-            Bht  = h5["mc_bkg_ht"][:]
-            Bnpv = h5["mc_bkg_Npv"][:]
-
-            Tht  = h5["mc_tt_ht"][:]
-            Aht  = h5["mc_aa_ht"][:]
-
-            # tt_Npv / aa_Npv (not mc_tt_Npv / mc_aa_Npv)
-            Tnpv = h5["tt_Npv"][:] if "tt_Npv" in keys else np.zeros_like(Tht, dtype=np.float32)
-            Anpv = h5["aa_Npv"][:] if "aa_Npv" in keys else np.zeros_like(Aht, dtype=np.float32)
-            # suppose dim = 2
-            Bas2 = _read_score(h5, "mc_bkg", hint)
-
-            Tas2 = _read_score(h5, "mc_tt",  hint)
-
-            Aas2 = _read_score(h5, "mc_aa",  hint)
-
-            if Bas2 is None or Tas2 is None or Aas2 is None:
-                raise SystemExit(
-                    f"[read_any_h5] MC file missing score{hint:02d}. "
-                    f"Expected keys like mc_bkg_score{hint:02d}, mc_tt_score{hint:02d}, mc_aa_score{hint:02d}. "
-                    f"Top-level keys: {sorted(list(keys))}"
-                )
-
-
-
-            return dict(
-                Bht=Bht, Bnpv=Bnpv,
-                Bas2=Bas2,
-                Tht=Tht, Tnpv=Tnpv,
-                Tas2=Tas2, 
-                Aht=Aht, Anpv=Anpv,
-                Aas2=Aas2,
-                meta=dict(matched_by_index=False),
-            )
-
-        # ------------------------------------------------------------
-        # Case B) RealData Trigger_food_Data (unpaired) OR paired Matched_data_2016_dim2.h5
-        #   - Paired Matched_data has data_Npv not data_bkg_Npv
-        #   - Unpaired Trigger_food_Data has data_bkg_Npv and also data_tt_Npv / data_aa_Npv
-        # ------------------------------------------------------------
-        has_bkg = ("data_bkg_ht" in keys)
-        has_npvs_any = ("data_Npv" in keys) or ("data_bkg_Npv" in keys)
-        has_tt = ("data_tt_ht" in keys)
-        has_aa = ("data_aa_ht" in keys)
-
-        if has_bkg and has_npvs_any and has_tt and has_aa:
-            # Background arrays
-            Bht = h5["data_bkg_ht"][:]
-            # paired file uses data_Npv; unpaired uses data_bkg_Npv
-            npv_key = _first_present(keys, ["data_Npv", "data_bkg_Npv"])
-            Bnpv = h5[npv_key][:]
-
-            # Signal arrays (already aligned to the background npv distribution if paired)
-            Tht = h5["data_tt_ht"][:]
-            Aht = h5["data_aa_ht"][:]
-
-            # keep these for the "mask by npv range" branch
-            # (in paired file they exist as data_tt_Npv / data_aa_Npv written by run_pairing_npv)
-            Tnpv_k = _first_present(keys, ["data_tt_Npv", "data_tt_npv"])
-            Anpv_k = _first_present(keys, ["data_aa_Npv", "data_aa_npv"])
-            Tnpv = h5[Tnpv_k][:] if Tnpv_k else np.zeros_like(Tht, dtype=np.float32)
-            Anpv = h5[Anpv_k][:] if Anpv_k else np.zeros_like(Aht, dtype=np.float32)
-
-            Bas2 = _read_score(h5, "data_bkg", hint)
-
-            Tas2 = _read_score(h5, "data_tt",  hint)
-
-            Aas2 = _read_score(h5, "data_aa",  hint)
-
-            if Bas2 is None or Tas2 is None or Aas2 is None:
-                raise SystemExit(
-                    f"[read_any_h5] Data file missing score{hint:02d}. "
-                    f"Expected keys like data_bkg_score{hint:02d}, data_tt_score{hint:02d}, data_aa_score{hint:02d}. "
-                    f"Top-level keys: {sorted(list(keys))}"
-                )
-
-
-            # IMPORTANT:
-            # - If file has data_Npv, tt/aa were already matched: should start with Matched_data_2016_dim2.h5 -> treat as matched_by_index=True
-            # - If file has data_bkg_Npv, it’s unpaired Trigger_food_Data.h5 -> matched_by_index=False
-            matched_by_index = ("data_Npv" in keys)
-
-            return dict(
-                Bht=Bht, Bnpv=Bnpv,
-                Bas2=Bas2, 
-                Tht=Tht, Tnpv=Tnpv,
-                Tas2=Tas2, 
-                Aht=Aht, Anpv=Anpv,
-                Aas2=Aas2, 
-                meta=dict(matched_by_index=matched_by_index),
-            )
-
-        # ------------------------------------------------------------
-        # Fall back: unknown layout
-        # ------------------------------------------------------------
-        raise SystemExit(
-            "[read_any_h5] Unrecognized H5 layout. "
-            "Run with --print-keys to inspect keys.\n"
-            f"Top-level keys: {sorted(list(keys))}"
-        )
 
 # ------------------------- main -------------------------
 def main():
@@ -259,7 +65,7 @@ def main():
 
     ap.add_argument("--ht-deltas", type=str, default="-2,-1,0,1,2",
                     help="HT DQN deltas (in HT cut units, like your HT script).")
-    ap.add_argument("--as-deltas", type=str, default="-2,-1,0,1,2",
+    ap.add_argument("--as-deltas", type=str, default="-3,-1.5,0,1.5,3",
                     help="AS DQN delta multipliers.")
     ap.add_argument("--as-step", type=float, default=0.5,
                     help="AS step: final delta or step we make for AS trigger = as_delta * as_step (tune the AS scale).")
@@ -317,10 +123,13 @@ def main():
 
     # Fixed cuts from a reference window (mimic Data_SingleTrigger.py)
     win_lo = min(start_event, N - 1)
-    win_hi = min(start_event + 10000, N)
-    if win_hi - win_lo < 1000:
-        win_lo = 0
-        win_hi = min(10000, N)
+    if args.control == "MC":
+        # Run_SingleTrigger.py uses 100k for MC DEBUG 
+        win_hi = min(start_event + 100000, N)
+    else:
+        #Data_SingleTrigger.py uses 10k for RealData DEBUG
+        win_hi = min(start_event + 10000, N)
+
 
     fixed_Ht_cut = float(np.percentile(Bht[win_lo:win_hi], 99.75))
     fixed_AS_cut = float(np.percentile(Bas[win_lo:win_hi], 99.75))
@@ -337,11 +146,6 @@ def main():
     as_hi = float(np.max(ref_as))
     as_mid  = 0.5 * (as_lo + as_hi)
     as_span = max(1e-6, as_hi - as_lo)
-
-    AS_DELTAS = np.array([-3, -2, -1, 0.0, 1, 2, 3], dtype=np.float32)
-    AS_STEP   = float(args.as_step)     # keep 1
-    MAX_DELTA_AS = float(np.max(np.abs(AS_DELTAS))) * AS_STEP
-    print("MAX_DELTA_AS=", MAX_DELTA_AS)
 
 
     print(f"[INFO] matched_by_index={matched_by_index} N={N} chunk={chunk_size} start_event={start_event}")
@@ -366,14 +170,20 @@ def main():
     beta  = 0.1   # move penalty
 
     HT_DELTAS = np.array([float(x) for x in args.ht_deltas.split(",")], dtype=np.float32)
-    # AS_DELTAS = np.array([float(x) for x in args.as_deltas.split(",")], dtype=np.float32)
-    # AS_STEP = float(args.as_step)
-    MAX_DELTA_HT = float(np.max(np.abs(HT_DELTAS)))
+    HT_STEP = 1.0
+    # AS_DELTAS = np.array([-3, -1.5, -1, 0.0, 1, 1.5, 3], dtype=np.float32)
+    # AS_STEP   = float(args.as_step)     # keep 1
+    MAX_DELTA_HT = float(np.max(np.abs(HT_DELTAS))) * HT_STEP
+
+    AS_DELTAS = np.array([float(x) for x in args.as_deltas.split(",")], dtype=np.float32)
+    AS_STEP = float(args.as_step)
+    MAX_DELTA_AS = float(np.max(np.abs(AS_DELTAS))) * AS_STEP
+    print("MAX_DELTA_AS=", MAX_DELTA_AS)
 
     cfg = DQNConfig(lr=5e-4, gamma=0.95, batch_size=128, target_update=200)
     agent_ht = DQNAgent(obs_dim=3, n_actions=len(HT_DELTAS), cfg=cfg, seed = SEED)
+    # Make AS agent larger learning rate for faster adaptation
     cfg_as = DQNConfig(lr=1e-4, gamma=0.95, batch_size=128, target_update=200)
-
     agent_as = DQNAgent(obs_dim=3, n_actions=len(AS_DELTAS), cfg=cfg_as, seed = SEED)
 
     # state trackers (HT)
