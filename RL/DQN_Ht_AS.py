@@ -41,7 +41,7 @@ from pathlib import Path
 from controllers import PD_controller1, PD_controller2
 from triggers import Sing_Trigger
 from RL.utils import cummean, rel_to_t0, add_cms_header, plot_rate_with_tolerance, save_png, print_h5_tree, read_any_h5 #save_pdf_png,
-from RL.dqn_agent import DQNAgent, make_obs, shield_delta, compute_reward, DQNConfig
+from RL.dqn_agent import DQNAgent, make_obs, shield_delta, compute_reward, DQNConfig, SeqDQNAgent, make_event_seq_as, make_event_seq_ht
 
 # ------------------------- Fixing seed for reproducibility -------------------------
 SEED = 20251213
