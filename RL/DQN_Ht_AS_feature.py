@@ -155,7 +155,7 @@ def main():
         # Run_SingleTrigger.py uses 100k for MC DEBUG 
         win_hi = min(start_event + 100000, N)
     else:
-        #Data_SingleTrigger.py uses 10k for RealData DEBUG
+        # Data_SingleTrigger.py uses 10k for RealData DEBUG
         win_hi = min(start_event + 10000, N)
 
 
@@ -195,7 +195,7 @@ def main():
     target = 0.25  # %
     tol = 0.02     # background - target/tolerance for reward?
     alpha = 0.4    # signal bonus
-    beta  = 0.1   # move penalty
+    beta  = 0.2   # move penalty
 
     HT_DELTAS = np.array([float(x) for x in args.ht_deltas.split(",")], dtype=np.float32)
     HT_STEP = 1.0
@@ -770,7 +770,7 @@ def main():
     ax.plot(time_as, As_dqn_hist, color="tab:purple", linewidth=2.0, label="DQN")
     ax.axhline(y=fixed_AS_cut, color="gray", linestyle="--", linewidth=1.5, label="fixed_AS_cut")
     ax.set_xlabel("Time (Fraction of Run)", loc="center")
-    ax.set_ylabel("AS_cut", loc="center")
+    ax.set_ylabel("Anomaly Score Cut", loc="center")
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.legend(title="AD Cut", fontsize=14, frameon=True, loc="best")
     add_cms_header(fig, run_label=run_label)

@@ -43,6 +43,10 @@ def plot_rate_with_tolerance(
     tol_upper=110.0,
     tol_lower=90.0,
     grid_alpha=0.6,
+    label_fs = 22,
+    tick_fs = 18,
+    legend_fs = 16,
+    legend_title_fs = 18,
     # styles (match your paper family)
     const_style=dict(color="tab:blue", linestyle="dashed", linewidth=3.0),
     pd_style=dict(color="mediumblue", linestyle="solid", linewidth=2.5),
@@ -76,8 +80,10 @@ def plot_rate_with_tolerance(
     ax.axhline(y=tol_upper, color="gray", linestyle="--", linewidth=1.5)
     ax.axhline(y=tol_lower, color="gray", linestyle="--", linewidth=1.5)
 
-    ax.set_xlabel(xlabel, loc="center")
-    ax.set_ylabel(ylabel, loc="center")
+    ax.set_xlabel(xlabel, loc="center", fontsize = label_fs)
+    ax.set_ylabel(ylabel, loc="center", fontsize = label_fs)
+    # Bigger tick labels (x and y)
+    ax.tick_params(axis="both", which="major", labelsize=tick_fs)
     ax.set_ylim(*ylim)
     ax.grid(True, linestyle="--", alpha=grid_alpha)
 
@@ -93,30 +99,31 @@ def plot_rate_with_tolerance(
         loc="upper left",
         bbox_to_anchor=(0.02, 0.98),
         frameon=True,
-        fontsize=14,
+        fontsize=legend_fs,
     )
+    leg_main.get_title().set_fontsize(legend_title_fs)
     ax.add_artist(leg_main)
 
     # ---- Reference legend (tolerances) ----
     upper = mlines.Line2D([], [], color="gray", linestyle="--", linewidth=1.5)
     lower = mlines.Line2D([], [], color="gray", linestyle="--", linewidth=1.5)
-    ax.legend(
+    leg_ref = ax.legend(
         [upper, lower],
         [f"Upper Tolerance ({int(tol_upper)})", f"Lower Tolerance ({int(tol_lower)})"],
         title="Reference",
         loc="upper right",
         bbox_to_anchor=(0.98, 0.98),
         frameon=True,
-        fontsize=14,
+        fontsize=legend_fs,
     )
-
+    leg_ref.get_title().set_fontsize(legend_title_fs)
     if add_cms_header is not None:
         # your add_cms_header(fig, run_label=...)
         add_cms_header(fig, run_label=run_label)
 
     if save_pdf_png is not None:
         save_pdf_png(fig, str(outbase), dpi_png=dpi_png)
-
+    
     plt.close(fig)
 
 
