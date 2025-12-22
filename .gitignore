@@ -12,7 +12,6 @@ runs/
 results/
 figs/
 *.pdf
-*.png
 
 # === Temporary / Cache ===
 __pycache__/

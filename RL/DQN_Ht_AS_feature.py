@@ -219,7 +219,7 @@ def main():
     near_widths_ht = (5.0, 10.0, 20.0)
     feat_dim_ht = 10 + len(near_widths_ht)   # 13       
 
-    near_widths_as = (0.01, 0.02, 0.05)
+    near_widths_as = (0.25, 0.5, 1.0)
     feat_dim_as = 10 + len(near_widths_as)   # 13
 
     agent_ht = SeqDQNAgent(seq_len=K, feat_dim=feat_dim_ht, n_actions=len(HT_DELTAS), cfg=cfg, seed=SEED)
@@ -566,20 +566,22 @@ def main():
         # pick mid width index: (5,10,20)->1 and (0.01,0.02,0.05)->1
         occ_mid_ht.append(float(occ_ht[1]))
         occ_mid_as.append(float(occ_as[1]))
+        
+        EPS_NORM = 1e-3  # in normalized cut units (tune 1e-4~1e-2)
 
         # (ii) sensitivity proxy based on chunk-to-chunk changes (DQN only)
         # Use *percent* units to make HT/AS comparable (optional but recommended)
         if len(R3_ht) >= 2:
             dr_ht = float(R3_ht[-1] - R3_ht[-2])          # background percent change
-            dcut_ht = float(Ht_dqn_hist[-1] - Ht_dqn_hist[-2])
-            sens_ht.append(abs(dr_ht) / (abs(dcut_ht) + 1e-6))
+            dtheta_ht = float(Ht_dqn_hist[-1] - Ht_dqn_hist[-2]) / ht_span
+            sens_ht.append(abs(dr_ht) / (abs(dtheta_ht) + EPS_NORM))
         else:
             sens_ht.append(np.nan)
 
         if len(R3_as) >= 2:
             dr_as = float(R3_as[-1] - R3_as[-2])          # background percent change
-            dcut_as = float(As_dqn_hist[-1] - As_dqn_hist[-2])
-            sens_as.append(abs(dr_as) / (abs(dcut_as) + 1e-9))
+            dtheta_as = float(As_dqn_hist[-1] - As_dqn_hist[-2]) / as_span
+            sens_as.append(abs(dr_as)/ (abs(dtheta_as) + EPS_NORM))
         else:
             sens_as.append(np.nan)  
 
@@ -639,6 +641,52 @@ def main():
         alpha=0.95,
         zorder=5,
     )
+    # ------------------------- common styles -------------------------
+    styles = {
+        "Constant": CONST_STYLE,
+        "PD":       PD_STYLE,
+        "DQN":      DQN_STYLE,
+    }
+
+    # --- consistent paper fonts ---
+    AX_LABEL_FS = 22
+    TICK_FS     = 18
+    LEGEND_FS   = 14
+    LEGEND_TITLE_FS = 16
+
+    def apply_axes_style(ax, xlabel, ylabel, ylim=None):
+        ax.set_xlabel(xlabel, loc="center", fontsize=AX_LABEL_FS)
+        ax.set_ylabel(ylabel, loc="center", fontsize=AX_LABEL_FS)
+        ax.tick_params(axis="both", which="major", labelsize=TICK_FS)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+    
+    # ------------------------- diagnostic plot styling -------------------------
+
+    DIAG_AX_LABEL_FS = AX_LABEL_FS
+    DIAG_TICK_FS     = TICK_FS
+    DIAG_LEGEND_FS   = LEGEND_FS
+    DIAG_LEGEND_TITLE_FS = LEGEND_TITLE_FS
+
+    def style_diag_axes(ax, xlabel, ylabel, ylim=None):
+        ax.set_xlabel(xlabel, fontsize=DIAG_AX_LABEL_FS)
+        ax.set_ylabel(ylabel, fontsize=DIAG_AX_LABEL_FS)
+        ax.tick_params(axis="both", which="major", labelsize=DIAG_TICK_FS)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        ax.grid(True, linestyle="--", alpha=0.5)
+
+    def style_diag_legend(ax, title=None, loc="best"):
+        leg = ax.legend(loc=loc, frameon=True, fontsize=DIAG_LEGEND_FS, title=title)
+        if title is not None and leg is not None:
+            leg.get_title().set_fontsize(DIAG_LEGEND_TITLE_FS)
+        return leg
+
+    def finalize_diag_fig(fig, top=0.86):
+        # Reserve space for CMS header so it doesn’t collide with ticks/title
+        fig.tight_layout()
+        fig.subplots_adjust(top=top)
+
     time = np.linspace(0, 1, len(R1_ht))
 
     # ------------------------- reward plots -------------------------
@@ -674,24 +722,33 @@ def main():
     occ_mid_as = np.asarray(occ_mid_as, dtype=np.float32)
 
     # Plot 1a: HT near-cut occupancy vs time (per chunk)
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig, ax = plt.subplots(figsize=(10, 8))
     for k, w in enumerate(near_widths_ht):
         ax.plot(time, near_occ_ht[:, k], linewidth=2.0, label=fr"$|HT-\theta|\leq {w:g}$ GeV")
-    ax.set_xlabel("Time (Fraction of Run)")
-    ax.set_ylabel("Near-cut occupancy (fraction)")
-    ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True, title="HT near widths")
+    style_diag_axes(
+        ax,
+        xlabel="Time (Fraction of Run)",
+        ylabel="Near-cut occupancy (fraction)",
+    )
+    style_diag_legend(ax, title="Near-cut window")
+
+    finalize_diag_fig(fig)
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(plots_dir / "near_cut_occupancy_ht_chunk"))
     plt.close(fig)
 
     # Plot 2a: HT sensitivity vs occupancy scatter (per chunk)
     m = np.isfinite(sens_ht)
-    fig, ax = plt.subplots(figsize=(6.5, 5.0))
-    ax.scatter(occ_mid_ht[m], sens_ht[m], s=18, alpha=0.45)
-    ax.set_xlabel(r"Near-cut occupancy ($w=10$ GeV)")
-    ax.set_ylabel(r"$|\,\Delta r\,| / (|\,\Delta \theta\,|+\epsilon)$  [pct/GeV]")
-    ax.grid(True, linestyle="--", alpha=0.5)
+    # fig, ax = plt.subplots(figsize=(6.5, 5.0))
+    fig, ax = plt.subplots(figsize=(10, 8)) 
+    ax.scatter(occ_mid_ht[m], sens_ht[m], s=18, alpha=0.50, label = "Per chunk")
+    style_diag_axes(
+        ax,
+        xlabel=r"Near-cut occupancy ($w=10$ GeV)",
+        ylabel=r"$|\,\Delta r\,| / (|\,\Delta \theta\,|+\epsilon)$  [pct/GeV]",
+    )
+    style_diag_legend(ax, title="Sensitivity scatter", loc="upper right")
+    finalize_diag_fig(fig)
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(plots_dir / "sensitivity_vs_occupancy_ht_chunk"))
     plt.close(fig)
@@ -741,25 +798,7 @@ def main():
         save_pdf_png=save_png,
     )
 
-    # ------------------------- common styles -------------------------
-    styles = {
-        "Constant": CONST_STYLE,
-        "PD":       PD_STYLE,
-        "DQN":      DQN_STYLE,
-    }
-
-    # --- consistent paper fonts ---
-    AX_LABEL_FS = 22
-    TICK_FS     = 18
-    LEGEND_FS   = 14
-    LEGEND_TITLE_FS = 16
-
-    def apply_axes_style(ax, xlabel, ylabel, ylim=None):
-        ax.set_xlabel(xlabel, loc="center", fontsize=AX_LABEL_FS)
-        ax.set_ylabel(ylabel, loc="center", fontsize=AX_LABEL_FS)
-        ax.tick_params(axis="both", which="major", labelsize=TICK_FS)
-        if ylim is not None:
-            ax.set_ylim(*ylim)
+    
     # =========================================================
     # HT plots
     # =========================================================
@@ -859,24 +898,41 @@ def main():
     # =========================================================
     time_as = np.linspace(0, 1, len(R1_as))
     # Plot 1b: AS near-cut occupancy vs time (per chunk)
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig, ax = plt.subplots(figsize=(10, 8))
     for k, w in enumerate(near_widths_as):
         ax.plot(time_as, near_occ_as[:, k], linewidth=2.0, label=fr"$|AS-\theta|\leq {w:g}$")
-    ax.set_xlabel("Time (Fraction of Run)")
-    ax.set_ylabel("Near-cut occupancy (fraction)")
-    ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True, title="AS near widths")
+    style_diag_axes(
+        ax,
+        xlabel="Time (Fraction of Run)",
+        ylabel="Near-cut occupancy (fraction)",
+    )
+    style_diag_legend(ax, title="Near-cut window")
+
+    finalize_diag_fig(fig)
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(plots_dir / "near_cut_occupancy_as_chunk"))
     plt.close(fig)
     
     # Plot 2b: AS sensitivity vs occupancy scatter (per chunk)
-    m = np.isfinite(sens_as)
-    fig, ax = plt.subplots(figsize=(6.5, 5.0))
-    ax.scatter(occ_mid_as[m], sens_as[m], s=18, alpha=0.45)
-    ax.set_xlabel(r"Near-cut occupancy ($w=0.02$)")
-    ax.set_ylabel(r"$|\,\Delta r\,| / (|\,\Delta \theta\,|+\epsilon)$  [pct/unit]")
-    ax.grid(True, linestyle="--", alpha=0.5)
+    m = np.isfinite(sens_as) & np.isfinite(occ_mid_as)
+    # fig, ax = plt.subplots(figsize=(6.5, 5.0))
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.scatter(
+        occ_mid_as[m],
+        sens_as[m],
+        s=22,
+        alpha=0.50,
+        label="Per chunk",
+    )
+
+    style_diag_axes(
+        ax,
+        xlabel=r"Near-cut occupancy ($w=0.5$)",
+        ylabel=r"$|\,\Delta r\,| / (|\,\Delta \theta\,|+\epsilon)$  [pct/unit]",
+    )
+    style_diag_legend(ax, title=None)
+
+    finalize_diag_fig(fig)
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(plots_dir / "sensitivity_vs_occupancy_as_chunk"))
     plt.close(fig)
