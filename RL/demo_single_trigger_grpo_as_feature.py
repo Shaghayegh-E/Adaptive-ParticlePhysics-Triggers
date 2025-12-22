@@ -2,43 +2,51 @@
 """
 demo_single_trigger_grpo_as_feature.py
 
-AS-only single-trigger control: Constant vs PD vs GRPO (bandit-style).
+AS-only single-trigger control: Constant vs PD vs GRPO (bandit-style), plus
+paper-friendly diagnostics to *showcase GRPO is better*:
 
-Key GRPO idea:
-  At each micro-step, given obs s:
-    - sample G candidate actions from policy
-    - evaluate reward for each candidate (counterfactual)
-    - compute relative advantage A_i = r_i - mean(r_group)
-    - update policy with PPO-style clipping + KL(pi||pi_ref)
-    - execute the best candidate action (or sample) to advance the cut
+1) Compact summary table (CSV + LaTeX) with:
+   - InBand (↑), MAE (↓), P95|e| (↓), ViolMag (↓), StepRMS (↓),
+     TT_inband (↑), AA_inband (↑), mix_80_20 (↑)
+2) CDF of |rate error| (kHz) for PD vs GRPO
+3) Running in-band fraction vs time
+4) Cut-step magnitude histogram |Δcut| (PD vs GRPO)
+5) In-band efficiency bars (PD vs GRPO)
 
-This tends to be more stable than DQN for AD because:
-  - no Q bootstrapping
-  - direct policy optimization with group-relative advantages
-  - easy to add stability penalties (occupancy/sensitivity) in reward
+Notes:
+- Rates are in *percent units* from Sing_Trigger: target r*=0.25 (%).
+- Convert to kHz via r_kHz = 400 * r_%.
+- If your tolerance band is [90,110] kHz around 100 kHz, use tol=0.025 (%).
 """
 
 import argparse
 import random
+import csv
 import numpy as np
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-
+import matplotlib as plt
 from controllers import PD_controller2
 from triggers import Sing_Trigger
-from RL.utils import (
-    add_cms_header, save_png, print_h5_tree, read_any_h5
-)
-from RL.dqn_agent import make_event_seq_as, shield_delta, compute_reward  # reuse your existing code
-from RL.grpo_agent import GRPOAgent, GRPOConfig
-
+from RL.utils import add_cms_header, save_png, print_h5_tree, read_any_h5
+from RL.dqn_agent import make_event_seq_as, shield_delta, compute_reward  # reuse your existing helpers
+from RL.grpo_agent import GRPOAgent, GRPOConfig #GRPO agent
+from RL.dqn_agent import SeqDQNAgent, DQNConfig  # DQN agent
 
 SEED = 20251221
 random.seed(SEED)
 np.random.seed(SEED)
 
+RATE_SCALE_KHZ = 400.0
 
+def cummean(x):
+    x = np.asarray(x, dtype=np.float64)
+    return np.cumsum(x) / np.arange(1, len(x) + 1)
+
+def rel_to_t0(x):
+    x = np.asarray(x, dtype=np.float64)
+    return x / (x[0] + 1e-12)
 def near_occupancy(x, cut, widths):
     x = np.asarray(x, dtype=np.float32)
     out = []
@@ -65,9 +73,151 @@ class RollingWindow:
         )
 
 
+# ----------------------------- metrics helpers -----------------------------
+def ecdf(x):
+    x = np.asarray(x, dtype=np.float64)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return np.array([]), np.array([])
+    x = np.sort(x)
+    y = (np.arange(1, x.size + 1) / x.size)
+    return x, y
+
+
+def summarize_compact(r_pct, s_tt, s_aa, cut_hist, target_pct, tol_pct):
+    """
+    r_pct: array of background rates in percent (e.g., 0.23, 0.26)
+    s_tt/s_aa: arrays of signal efficiencies (also in percent units) per chunk
+    cut_hist: threshold values per chunk
+    """
+    r = np.asarray(r_pct, dtype=np.float64)
+    s_tt = np.asarray(s_tt, dtype=np.float64)
+    s_aa = np.asarray(s_aa, dtype=np.float64)
+    c = np.asarray(cut_hist, dtype=np.float64)
+
+    err = r - float(target_pct)
+    inband = np.abs(err) <= float(tol_pct)
+
+    def safe_mean(x, m):
+        return float(np.mean(x[m])) if np.any(m) else np.nan
+
+    out = {}
+    out["MAE"] = float(np.mean(np.abs(err)))
+    out["P95_abs_err"] = float(np.percentile(np.abs(err), 95))
+    out["InBand"] = float(np.mean(inband))
+    out["ViolMag"] = float(np.mean(np.maximum(0.0, np.abs(err) - float(tol_pct))))
+
+    dc = np.diff(c) if c.size >= 2 else np.array([], dtype=np.float64)
+    out["StepRMS"] = float(np.sqrt(np.mean(dc**2))) if dc.size else 0.0
+
+    out["TT_inband"] = safe_mean(s_tt, inband)
+    out["AA_inband"] = safe_mean(s_aa, inband)
+    out["Mix80_20"] = safe_mean(0.2 * s_tt + 0.8 * s_aa, inband)
+    return out
+
+
+def write_compact_tables(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct):
+    # CSV
+    fieldnames = list(rows[0].keys())
+    with open(out_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+
+    # Identify best per metric for LaTeX bolding
+    # ↑ better: InBand, TT_inband, AA_inband, Mix80_20
+    # ↓ better: MAE, P95_abs_err, ViolMag, StepRMS
+    higher_better = {"InBand", "TT_inband", "AA_inband", "Mix80_20"}
+    lower_better = {"MAE", "P95_abs_err", "ViolMag", "StepRMS"}
+
+    # group by Trigger if present
+    triggers = sorted(set(r["Trigger"] for r in rows))
+    best = {tr: {} for tr in triggers}
+
+    for tr in triggers:
+        sub = [r for r in rows if r["Trigger"] == tr]
+        for k in higher_better:
+            vals = np.array([float(r[k]) for r in sub], dtype=np.float64)
+            i = int(np.nanargmax(vals)) if np.any(np.isfinite(vals)) else 0
+            best[tr][k] = sub[i]["Method"]
+        for k in lower_better:
+            vals = np.array([float(r[k]) for r in sub], dtype=np.float64)
+            i = int(np.nanargmin(vals)) if np.any(np.isfinite(vals)) else 0
+            best[tr][k] = sub[i]["Method"]
+
+    def fmt(v, nd=3):
+        if isinstance(v, (float, np.floating)):
+            if abs(v) < 1e-3 and v != 0:
+                return f"{v:.2e}"
+            return f"{v:.{nd}f}"
+        return str(v)
+
+    def cell(tr, method, key, val):
+        s = fmt(val, 3)
+        if best.get(tr, {}).get(key, None) == method:
+            return r"\textbf{" + s + "}"
+        return s
+
+    # LaTeX (Overleaf-friendly, compact)
+    lines = []
+    lines.append(r"\begin{table}[t]")
+    lines.append(r"\centering")
+    lines.append(r"\small")
+    lines.append(r"\setlength{\tabcolsep}{5pt}")
+    lines.append(r"\renewcommand{\arraystretch}{1.10}")
+    lines.append(r"\begin{tabular}{llrrrrrrrr}")
+    lines.append(r"\hline")
+    lines.append(
+        r"Trigger & Method & InBand$\uparrow$ & MAE$\downarrow$ & P95$|e|$$\downarrow$ & "
+        r"ViolMag$\downarrow$ & StepRMS$\downarrow$ & TT$\uparrow$ & AA$\uparrow$ & 80/20$\uparrow$ \\"
+    )
+    lines.append(r"\hline")
+
+    for tr in triggers:
+        sub = [r for r in rows if r["Trigger"] == tr]
+        lines.append(rf"\multicolumn{{10}}{{l}}{{\textbf{{{tr} trigger}}}} \\")
+        for r in sub:
+            m = r["Method"]
+            lines.append(
+                f"{tr} & {m} & "
+                f"{cell(tr,m,'InBand',r['InBand'])} & "
+                f"{cell(tr,m,'MAE',r['MAE'])} & "
+                f"{cell(tr,m,'P95_abs_err',r['P95_abs_err'])} & "
+                f"{cell(tr,m,'ViolMag',r['ViolMag'])} & "
+                f"{cell(tr,m,'StepRMS',r['StepRMS'])} & "
+                f"{cell(tr,m,'TT_inband',r['TT_inband'])} & "
+                f"{cell(tr,m,'AA_inband',r['AA_inband'])} & "
+                f"{cell(tr,m,'Mix80_20',r['Mix80_20'])} \\\\"
+            )
+        lines.append(r"\midrule")
+
+    lines.append(r"\hline")
+    lines.append(r"\end{tabular}")
+    lines.append(
+        rf"\caption{{\textbf{{Single-trigger control summary (AS).}} "
+        rf"Rates are in percent units with target $r^*={target_pct:.3f}\%$ and tolerance $\pm {tol_pct:.3f}\%$. "
+        rf"InBand is the fraction of chunks within $|r-r^*|\le\tau$; MAE/P95$|e|$/ViolMag quantify rate tracking; "
+        rf"StepRMS quantifies cut actuation; TT/AA/80--20 are mean signal efficiencies \emph{{conditioned on in-band chunks}}.}}"
+    )
+    lines.append(r"\label{tab:grpo_as_summary}")
+    lines.append(r"\end{table}")
+
+    with open(out_tex, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def running_mean_bool(mask, w=7):
+    m = np.asarray(mask, dtype=np.float64)
+    k = np.ones(int(w), dtype=np.float64)
+    return np.convolve(m, k, mode="same") / np.convolve(np.ones_like(m), k, mode="same")
+
+
+# ----------------------------- main -----------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", default="Data/Trigger_food_MC.h5", choices = ["Data/Trigger_food_MC.h5", "Data/Matched_data_2016_dim2.h5"])
+
+    ap.add_argument("--input", default="Data/Trigger_food_MC.h5",
+                    choices=["Data/Trigger_food_MC.h5", "Data/Matched_data_2016_dim2.h5"])
     ap.add_argument("--outdir", default="outputs/demo_sing_grpo_as_feature")
     ap.add_argument("--control", default="MC", choices=["MC", "RealData"])
     ap.add_argument("--score-dim-hint", type=int, default=2)
@@ -84,22 +234,33 @@ def main():
     ap.add_argument("--inner-stride", type=int, default=10000)
 
     # GRPO knobs
-    ap.add_argument("--group-size", type=int, default=16, help="GRPO group candidates per micro-step")
-    ap.add_argument("--train-every", type=int, default=50, help="policy update frequency (micro-steps)")
-    ap.add_argument("--temperature", type=float, default=1.0, help="sampling temperature")
+    ap.add_argument("--group-size", type=int, default=16)
+    ap.add_argument("--train-every", type=int, default=50)
+    ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--beta-kl", type=float, default=0.02)
     ap.add_argument("--ent-coef", type=float, default=0.01)
     ap.add_argument("--lr", type=float, default=3e-4)
 
     # objective/reward
-    ap.add_argument("--target", type=float, default=0.25)  # percent
-    ap.add_argument("--tol", type=float, default=0.02)      # percent (band)
-    ap.add_argument("--alpha", type=float, default=0.4)     # signal bonus
-    ap.add_argument("--beta", type=float, default=0.2)      # move penalty
+    ap.add_argument("--target", type=float, default=0.25)   # percent
+    ap.add_argument("--tol", type=float, default=0.025,     # percent  (0.025% -> ±10kHz band)
+                    help="tolerance in percent units; 0.025 corresponds to [90,110] kHz when target=0.25%")
+    ap.add_argument("--alpha", type=float, default=0.4)
+    ap.add_argument("--beta", type=float, default=0.2)
 
     # optional stabilization (AD-specific)
     ap.add_argument("--occ-pen", type=float, default=0.0,
                     help="extra penalty weight for near-cut occupancy * |delta| (suggest 0.5~3.0)")
+    ap.add_argument("--run-avg-window", type=int, default=7,
+                    help="window size (chunks) for running in-band fraction plot")
+    # DQN knobs (AS-only)
+    ap.add_argument("--dqn-lr", type=float, default=1e-4)
+    ap.add_argument("--dqn-gamma", type=float, default=0.95)
+    ap.add_argument("--dqn-batch-size", type=int, default=32)
+    ap.add_argument("--dqn-target-update", type=int, default=200)
+    ap.add_argument("--dqn-train-steps-per-micro", type=int, default=1)
+    ap.add_argument("--dqn-eps-min", type=float, default=0.05)
+    ap.add_argument("--dqn-eps-decay", type=float, default=0.98)
     args = ap.parse_args()
 
     if args.print_keys:
@@ -108,6 +269,10 @@ def main():
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
+    plots_dir = outdir / "extra_plots"
+    tables_dir = outdir / "tables"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    tables_dir.mkdir(parents=True, exist_ok=True)
 
     d = read_any_h5(args.input, score_dim_hint=args.score_dim_hint)
     matched_by_index = bool(d["meta"].get("matched_by_index", False))
@@ -139,7 +304,7 @@ def main():
     win_hi = min(start_event + (100000 if args.control == "MC" else 10000), N)
     fixed_AS_cut = float(np.percentile(Bas[win_lo:win_hi], 99.75))
 
-    # clip range
+    # clip range (use calibration window range)
     ref_as = Bas[win_lo:win_hi]
     as_lo = float(np.min(ref_as))
     as_hi = float(np.max(ref_as))
@@ -166,7 +331,7 @@ def main():
     # features
     K = int(args.seq_len)
     near_widths_as = (0.25, 0.5, 1.0)
-    feat_dim_as = 10 + len(near_widths_as)  # must match make_event_seq_as()
+    feat_dim_as = 10 + len(near_widths_as)
 
     # GRPO agent
     cfg = GRPOConfig(
@@ -179,23 +344,43 @@ def main():
         ref_update_interval=200,
     )
     agent = GRPOAgent(seq_len=K, feat_dim=feat_dim_as, n_actions=len(AS_DELTAS), cfg=cfg, seed=SEED)
+    # ---------------- DQN agent (AS only for now temporarilly, parallel baseline) ----------------
+    dqn_cfg = DQNConfig(
+        lr=float(args.dqn_lr),
+        gamma=float(args.dqn_gamma),
+        batch_size=int(args.dqn_batch_size),
+        target_update=int(args.dqn_target_update),
+    )
+    dqn_as = SeqDQNAgent(seq_len=K, feat_dim=feat_dim_as, n_actions=len(AS_DELTAS),
+                        cfg=dqn_cfg, seed=SEED)
+
+    AS_cut_dqn = fixed_AS_cut
+    prev_bg_dqn = None
+    last_das_dqn = 0.0
+    dqn_losses = []
+    dqn_rewards = []
 
     # rolling window for event features
     roll = RollingWindow(max_events=int(args.window_events_chunk_size * chunk_size))
 
-    # logs
-    RATE_SCALE_KHZ = 400.0
+    # logs (background in percent units first)
     target = float(args.target)
     tol = float(args.tol)
+    run_label = "MC" if args.control == "MC" else "283408"
 
-    R_const, R_pd, R_grpo = [], [], []
+    R_const_pct, R_pd_pct, R_grpo_pct = [], [], []
     Cut_pd, Cut_grpo = [], []
     TT_const, TT_pd, TT_grpo = [], [], []
     AA_const, AA_pd, AA_grpo = [], [], []
+
+    R_dqn_pct = []
+    Cut_dqn = []
+    TT_dqn = []
+    AA_dqn = []
+
     losses = []
     rewards = []
 
-    # loop
     batch_starts = list(range(start_event, N, chunk_size))
     micro_counter = 0
 
@@ -239,13 +424,86 @@ def main():
 
             roll.append(bas_j, bnpv_j)
             bas_w, bnpv_w = roll.get()
+            # -------------------- DQN micro-step (AS) --------------------
+            bg_before_dqn = Sing_Trigger(bas_j, AS_cut_dqn)
+            if prev_bg_dqn is None:
+                prev_bg_dqn = bg_before_dqn
 
-            # bg rate before
+            obs_dqn = make_event_seq_as(
+                bas=bas_w, bnpv=bnpv_w,
+                bg_rate=bg_before_dqn,
+                prev_bg_rate=prev_bg_dqn,
+                cut=AS_cut_dqn,
+                as_mid=as_mid, as_span=as_span,
+                target=target,
+                K=K,
+                last_delta=last_das_dqn,
+                max_delta=MAX_DELTA_AS,
+                near_widths=near_widths_as,
+            )
+
+            step = micro_counter  # reuse your global micro counter
+            eps = max(float(args.dqn_eps_min), 1.0 * (float(args.dqn_eps_decay) ** step))
+
+            a_dqn = dqn_as.act(obs_dqn, eps=eps)
+            das_dqn = float(AS_DELTAS[a_dqn] * AS_STEP)
+
+            # safety shield
+            sd = shield_delta(bg_before_dqn, target, tol, MAX_DELTA_AS)
+            if sd is not None:
+                das_dqn = float(sd)
+
+            cut_next_dqn = float(np.clip(AS_cut_dqn + das_dqn, as_lo, as_hi))
+            bg_after_dqn = Sing_Trigger(bas_j, cut_next_dqn)
+
+            # signal proxy (same as GRPO uses)
+            tt_after_dqn = Sing_Trigger(sas_tt, cut_next_dqn)
+            aa_after_dqn = Sing_Trigger(sas_aa, cut_next_dqn)
+
+            obs_next_dqn = make_event_seq_as(
+                bas=bas_w, bnpv=bnpv_w,
+                bg_rate=bg_after_dqn,
+                prev_bg_rate=bg_before_dqn,
+                cut=cut_next_dqn,
+                as_mid=as_mid, as_span=as_span,
+                target=target,
+                K=K,
+                last_delta=das_dqn,
+                max_delta=MAX_DELTA_AS,
+                near_widths=near_widths_as,
+            )
+
+            r_dqn = compute_reward(
+                bg_rate=bg_after_dqn,
+                target=target,
+                tol=tol,
+                sig_rate_1=tt_after_dqn,
+                sig_rate_2=aa_after_dqn,
+                delta_applied=das_dqn,
+                max_delta=MAX_DELTA_AS,
+                alpha=float(args.alpha),
+                beta=float(args.beta),
+                prev_bg_rate=bg_before_dqn,
+                gamma_stab=0.3,
+            )
+
+            dqn_as.buf.push(obs_dqn, int(a_dqn), float(r_dqn), obs_next_dqn, done=False)
+
+            for _ in range(int(args.dqn_train_steps_per_micro)):
+                loss = dqn_as.train_step()
+                if loss is not None:
+                    dqn_losses.append(float(loss))
+
+            # advance DQN state
+            AS_cut_dqn = cut_next_dqn
+            prev_bg_dqn = bg_after_dqn
+            last_das_dqn = das_dqn
+            dqn_rewards.append(float(r_dqn))
+
             bg_before = Sing_Trigger(bas_j, AS_cut_grpo)
             if prev_bg_as is None:
                 prev_bg_as = bg_before
 
-            # build obs
             obs = make_event_seq_as(
                 bas=bas_w, bnpv=bnpv_w,
                 bg_rate=bg_before,
@@ -263,26 +521,19 @@ def main():
             G = int(args.group_size)
             acts, old_logps = agent.sample_group_actions(obs, group_size=G, temperature=float(args.temperature))
 
-            # Evaluate each candidate action counterfactually
             cand_rewards = np.zeros(G, dtype=np.float32)
-            cand_deltas = np.zeros(G, dtype=np.float32)
-            cand_bg_after = np.zeros(G, dtype=np.float32)
 
-            # compute near-occupancy (chunk-level proxy) for optional penalty
+            # occupancy proxy for optional penalty (computed on micro-step bg slice)
             occ_mid = float(near_occupancy(bas_j, AS_cut_grpo, near_widths_as)[1])  # w=0.5
 
             for k in range(G):
                 a = int(acts[k])
                 das = float(AS_DELTAS[a] * AS_STEP)
-                cand_deltas[k] = das
 
-                # candidate next cut
                 cut_next = float(np.clip(AS_cut_grpo + das, as_lo, as_hi))
-
                 bg_after = Sing_Trigger(bas_j, cut_next)
-                cand_bg_after[k] = bg_after
 
-                # signal accepts (micro-step proxy: use sas_tt/sas_aa from chunk as approximation)
+                # micro-step signal proxy: evaluate on chunk-level signal arrays (stable / low-variance)
                 tt_after = Sing_Trigger(sas_tt, cut_next)
                 aa_after = Sing_Trigger(sas_aa, cut_next)
 
@@ -300,25 +551,22 @@ def main():
                     gamma_stab=0.3,
                 )
 
-                # optional stabilization: penalize moving when occupancy is high
                 if args.occ_pen > 0:
                     r -= float(args.occ_pen) * occ_mid * (abs(das) / (MAX_DELTA_AS + 1e-6))
 
-                cand_rewards[k] = r
+                cand_rewards[k] = float(r)
 
-            r_mean = float(np.mean(cand_rewards))
-            adv = cand_rewards - r_mean
+            adv = cand_rewards - float(np.mean(cand_rewards))
 
-            # push group samples to buffer
             for k in range(G):
                 agent.buf.push(obs, int(acts[k]), float(old_logps[k]), float(adv[k]))
 
-            # pick executed action: best reward in group (stable)
+            # execute best candidate (greedy over group)
             k_best = int(np.argmax(cand_rewards))
             a_exec = int(acts[k_best])
             das_exec = float(AS_DELTAS[a_exec] * AS_STEP)
 
-            # safety shield (optional but recommended)
+            # safety shield to avoid runaway when far from band
             sd = shield_delta(bg_before, target, tol, MAX_DELTA_AS)
             if sd is not None:
                 das_exec = float(sd)
@@ -326,7 +574,6 @@ def main():
             cut_next = float(np.clip(AS_cut_grpo + das_exec, as_lo, as_hi))
             bg_after_exec = Sing_Trigger(bas_j, cut_next)
 
-            # execute transition
             AS_cut_grpo = cut_next
             prev_bg_as = bg_after_exec
             last_das = das_exec
@@ -334,18 +581,18 @@ def main():
             micro_rewards.append(float(cand_rewards[k_best]))
             micro_counter += 1
 
-            # update periodically
             if micro_counter % int(args.train_every) == 0:
                 loss = agent.update()
                 if loss is not None:
-                    losses.append(loss)
+                    losses.append(float(loss))
 
         # ---- end micro loop ----
 
-        # chunk-level logging
+        # chunk-level rates/eff
         bg_const = Sing_Trigger(bas, fixed_AS_cut)
         bg_pd = Sing_Trigger(bas, AS_cut_pd)
         bg_grpo = Sing_Trigger(bas, AS_cut_grpo)
+        bg_dqn = Sing_Trigger(bas, AS_cut_dqn)
 
         # PD update once per chunk
         AS_cut_pd, pre_as_err = PD_controller2(bg_pd, pre_as_err, AS_cut_pd)
@@ -354,14 +601,21 @@ def main():
         tt_const = Sing_Trigger(sas_tt, fixed_AS_cut)
         tt_pd = Sing_Trigger(sas_tt, AS_cut_pd)
         tt_grpo = Sing_Trigger(sas_tt, AS_cut_grpo)
+        tt_dqn = Sing_Trigger(sas_tt, AS_cut_dqn)
+        aa_dqn = Sing_Trigger(sas_aa, AS_cut_dqn)
 
         aa_const = Sing_Trigger(sas_aa, fixed_AS_cut)
         aa_pd = Sing_Trigger(sas_aa, AS_cut_pd)
         aa_grpo = Sing_Trigger(sas_aa, AS_cut_grpo)
 
-        R_const.append(bg_const * RATE_SCALE_KHZ)
-        R_pd.append(bg_pd * RATE_SCALE_KHZ)
-        R_grpo.append(bg_grpo * RATE_SCALE_KHZ)
+        R_const_pct.append(bg_const)
+        R_pd_pct.append(bg_pd)
+        R_grpo_pct.append(bg_grpo)
+        R_dqn_pct.append(bg_dqn)
+
+        Cut_dqn.append(AS_cut_dqn)
+        TT_dqn.append(tt_dqn)
+        AA_dqn.append(aa_dqn)
 
         Cut_pd.append(AS_cut_pd)
         Cut_grpo.append(AS_cut_grpo)
@@ -373,30 +627,95 @@ def main():
 
         if t % 5 == 0:
             print(f"[chunk {t:4d}] "
-                  f"AS bg% const={bg_const:.3f} pd={bg_pd:.3f} grpo={bg_grpo:.3f} "
-                  f"| cut pd={AS_cut_pd:.5f} grpo={AS_cut_grpo:.5f} "
-                  f"| reward={rewards[-1]} loss={losses[-1] if losses else None}")
+                f"AS bg% const={bg_const:.3f} pid={bg_pd:.3f} dqn={bg_dqn:.3f} grpo={bg_grpo:.3f} "
+                f"| cut pid={AS_cut_pd:.5f} dqn={AS_cut_dqn:.5f} grpo={AS_cut_grpo:.5f} "
+                f"| grpo_reward={rewards[-1]} grpo_loss={losses[-1] if losses else None} "
+                f"| dqn_loss={dqn_losses[-1] if dqn_losses else None}")
 
-    # ---- plotting ----
-    R_const = np.asarray(R_const)
-    R_pd = np.asarray(R_pd)
-    R_grpo = np.asarray(R_grpo)
-    Cut_pd = np.asarray(Cut_pd)
-    Cut_grpo = np.asarray(Cut_grpo)
+    # ----------------------------- arrays -----------------------------
+    R_const_pct = np.asarray(R_const_pct, dtype=np.float64)
+    R_pd_pct = np.asarray(R_pd_pct, dtype=np.float64)
+    R_grpo_pct = np.asarray(R_grpo_pct, dtype=np.float64)
+    Cut_pd = np.asarray(Cut_pd, dtype=np.float64)
+    Cut_grpo = np.asarray(Cut_grpo, dtype=np.float64)
+    TT_const = np.asarray(TT_const, dtype=np.float64)
+    TT_pd = np.asarray(TT_pd, dtype=np.float64)
+    TT_grpo = np.asarray(TT_grpo, dtype=np.float64)
+    AA_const = np.asarray(AA_const, dtype=np.float64)
+    AA_pd = np.asarray(AA_pd, dtype=np.float64)
+    AA_grpo = np.asarray(AA_grpo, dtype=np.float64)
+    # dqn
+    R_dqn_pct = np.asarray(R_dqn_pct, dtype=np.float64)
+    Cut_dqn   = np.asarray(Cut_dqn, dtype=np.float64)
+    TT_dqn    = np.asarray(TT_dqn, dtype=np.float64)
+    AA_dqn    = np.asarray(AA_dqn, dtype=np.float64)
 
-    time = np.linspace(0, 1, len(R_const))
-    run_label = "MC" if args.control == "MC" else "283408"
+    time = np.linspace(0, 1, len(R_const_pct))
 
-    upper_tol_khz = 110.0
-    lower_tol_khz = 90.0
+    # kHz for plots
+    R_const_khz = R_const_pct * RATE_SCALE_KHZ
+    R_pd_khz = R_pd_pct * RATE_SCALE_KHZ
+    R_grpo_khz = R_grpo_pct * RATE_SCALE_KHZ
+    R_dqn_khz = R_dqn_pct * RATE_SCALE_KHZ
+
+    target_khz = target * RATE_SCALE_KHZ
+    tol_khz = tol * RATE_SCALE_KHZ
+    upper_tol_khz = target_khz + tol_khz
+    lower_tol_khz = target_khz - tol_khz
 
     import matplotlib.pyplot as plt
 
-    # rate plot
+    def plot_rel_local(time, const, pid, dqn, grpo, ylabel, title, outpath):
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(time, rel_to_t0(const), linestyle="--", linewidth=2.2, label="Constant")
+        ax.plot(time, rel_to_t0(pid), linewidth=2.2, label="PID")
+        ax.plot(time, rel_to_t0(dqn), linewidth=3.0, linestyle=(0, (8, 2, 2, 2)),
+                marker="o", markersize=4, markevery=6, label="DQN")
+        ax.plot(time, rel_to_t0(grpo), linewidth=3.2, linestyle=(0, (10, 2, 2, 2)), label="GRPO")
+        ax.set_xlabel("Time (Fraction of Run)")
+        ax.set_ylabel(ylabel)
+        ax.set_ylim(0.5, 2.5)
+        ax.grid(True, linestyle="--", alpha=0.6)
+        ax.legend(loc="best", frameon=True, title=title)
+        add_cms_header(fig, run_label=run_label)
+        save_png(fig, str(outpath))
+        plt.close(fig)
+
+    plot_rel_local(time, TT_const, TT_pd, TT_dqn, TT_grpo,
+               ylabel="Relative Efficiency", title="ttbar", outpath=outdir/"L_tt_eff_all_methods")
+    plot_rel_local(time, AA_const, AA_pd, AA_dqn, AA_grpo,
+               ylabel="Relative Efficiency", title="HToAATo4B", outpath=outdir/"L_aa_eff_all_methods")
+
+
+    def plot_rel_cum(time, const, pid, dqn, grpo, ylabel, title, outpath):
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(time, rel_to_t0(cummean(const)), linestyle="--", linewidth=2.2, label="Constant")
+        ax.plot(time, rel_to_t0(cummean(pid)), linewidth=2.2, label="PID")
+        ax.plot(time, rel_to_t0(cummean(dqn)), linewidth=3.0, linestyle=(0, (8, 2, 2, 2)),
+            marker="o", markersize=4, markevery=6, label="DQN")
+        ax.plot(time, rel_to_t0(cummean(grpo)), linewidth=3.2, linestyle=(0, (10, 2, 2, 2)), label="GRPO")
+        ax.set_xlabel("Time (Fraction of Run)")
+        ax.set_ylabel(ylabel)
+        ax.set_ylim(0.5, 2.5)
+        ax.grid(True, linestyle="--", alpha=0.6)
+        ax.legend(loc="best", frameon=True, title=title)
+        add_cms_header(fig, run_label=run_label)
+        save_png(fig, str(outpath))
+        plt.close(fig)
+
+    plot_rel_cum(time, TT_const, TT_pd, TT_dqn, TT_grpo,
+             ylabel="Relative Cumulative Efficiency", title="ttbar", outpath=outdir/"C_tt_eff_all_methods")
+    plot_rel_cum(time, AA_const, AA_pd, AA_dqn, AA_grpo,
+             ylabel="Relative Cumulative Efficiency", title="HToAATo4B", outpath=outdir/"C_aa_eff_all_methods")
+
+    # ----------------------------- core plots -----------------------------
+    # rate plot (main)
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(time, R_const, linestyle="--", linewidth=2.4, label="Constant")
-    ax.plot(time, R_pd, linewidth=2.4, label="PD")
-    ax.plot(time, R_grpo, linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), label="GRPO")
+    ax.plot(time, R_const_khz, linestyle="--", linewidth=2.4, label="Constant")
+    ax.plot(time, R_pd_khz, linewidth=2.4, label="PD")
+    ax.plot(time, R_dqn_khz, linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), marker="o",
+            markersize=4, markevery=6, label="DQN")
+    ax.plot(time, R_grpo_khz, linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), label="GRPO")
 
     ax.axhline(upper_tol_khz, linestyle="--", linewidth=1.2)
     ax.axhline(lower_tol_khz, linestyle="--", linewidth=1.2)
@@ -446,7 +765,105 @@ def main():
         save_png(fig, str(outdir / "grpo_loss_as"))
         plt.close(fig)
 
+    # ----------------------------- showcase plots (paper) -----------------------------
+    # 1) CDF of absolute error (kHz): PD vs GRPO
+    e_pd = np.abs(R_pd_khz - target_khz)
+    e_gr = np.abs(R_grpo_khz - target_khz)
+    x1, y1 = ecdf(e_pd)
+    x2, y2 = ecdf(e_gr)
+
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    ax.plot(x1, y1, linewidth=2.2, label="PD")
+    ax.plot(x2, y2, linewidth=2.2, label="GRPO")
+    ax.axvline(tol_khz, linestyle="--", linewidth=1.6, label=f"Tolerance = {tol_khz:.1f} kHz")
+    ax.set_xlabel(r"$|r-r^*|$ [kHz]")
+    ax.set_ylabel("CDF")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(plots_dir / "cdf_abs_err_as_pd_vs_grpo"))
+    plt.close(fig)
+
+    # 2) Running in-band fraction vs time: PD vs GRPO
+    in_pd = (np.abs(R_pd_pct - target) <= tol)
+    in_gr = (np.abs(R_grpo_pct - target) <= tol)
+    w = int(args.run_avg_window)
+
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    ax.plot(time, running_mean_bool(in_pd, w=w), linewidth=2.2, label=f"PD (w={w})")
+    ax.plot(time, running_mean_bool(in_gr, w=w), linewidth=2.2, label=f"GRPO (w={w})")
+    ax.set_xlabel("Time (Fraction of Run)")
+    ax.set_ylabel("Running in-band fraction")
+    ax.set_ylim(0.0, 1.05)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(plots_dir / "running_inband_as_pd_vs_grpo"))
+    plt.close(fig)
+
+    # 3) Cut-step magnitude histogram |Δcut|: PD vs GRPO
+    dp = np.diff(Cut_pd) if Cut_pd.size >= 2 else np.array([], dtype=np.float64)
+    dg = np.diff(Cut_grpo) if Cut_grpo.size >= 2 else np.array([], dtype=np.float64)
+
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    ax.hist(np.abs(dp), bins=30, alpha=0.55, label="PD")
+    ax.hist(np.abs(dg), bins=30, alpha=0.55, label="GRPO")
+    ax.set_xlabel(r"$|\Delta AS\_cut|$")
+    ax.set_ylabel("Count")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.legend(loc="best", frameon=True)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(plots_dir / "cut_step_hist_as_pd_vs_grpo"))
+    plt.close(fig)
+
+    # 4) In-band efficiency bars (PD vs GRPO)
+    sum_pd = summarize_compact(R_pd_pct, TT_pd, AA_pd, Cut_pd, target, tol)
+    sum_gr = summarize_compact(R_grpo_pct, TT_grpo, AA_grpo, Cut_grpo, target, tol)
+
+    labels = ["ttbar", "HToAATo4B", "80/20"]
+    pd_vals = [sum_pd["TT_inband"], sum_pd["AA_inband"], sum_pd["Mix80_20"]]
+    gr_vals = [sum_gr["TT_inband"], sum_gr["AA_inband"], sum_gr["Mix80_20"]]
+
+    x = np.arange(len(labels))
+    bw = 0.35
+
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    ax.bar(x - bw/2, pd_vals, width=bw, label="PD")
+    ax.bar(x + bw/2, gr_vals, width=bw, label="GRPO")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Mean signal efficiency (in-band)")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(plots_dir / "inband_eff_bars_as_pd_vs_grpo"))
+    plt.close(fig)
+
+    # ----------------------------- compact summary table -----------------------------
+    # constant row
+    sum_const = summarize_compact(R_const_pct, TT_const, AA_const,
+                                  np.full_like(Cut_pd, fixed_AS_cut), target, tol)
+
+    rows = []
+    def add_row(method, dct):
+        r = {"Trigger": "AD", "Method": method}
+        r.update(dct)
+        rows.append(r)
+
+    sum_dq = summarize_compact(R_dqn_pct, TT_dqn, AA_dqn, Cut_dqn, target, tol)
+    add_row("Constant", sum_const)
+    add_row("PD", sum_pd)
+    add_row("DQN", sum_dq)
+    add_row("GRPO", sum_gr)
+
+    out_csv = tables_dir / "grpo_as_compact_summary.csv"
+    out_tex = tables_dir / "grpo_as_compact_summary.tex"
+    write_compact_tables(rows, out_csv, out_tex, target_pct=target, tol_pct=tol)
+
     print(f"\n[OK] Saved outputs to: {outdir}")
+    print(f"[OK] Wrote: {out_csv}")
+    print(f"[OK] Wrote: {out_tex}")
+    print(f"[OK] Extra plots: {plots_dir}")
 
 
 if __name__ == "__main__":
