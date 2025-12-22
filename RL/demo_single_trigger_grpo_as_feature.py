@@ -26,13 +26,13 @@ import numpy as np
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-import matplotlib as plt
+import matplotlib.pyplot as plt
 from controllers import PD_controller2
 from triggers import Sing_Trigger
 from RL.utils import add_cms_header, save_png, print_h5_tree, read_any_h5
-from RL.dqn_agent import make_event_seq_as, shield_delta, compute_reward  # reuse your existing helpers
 from RL.grpo_agent import GRPOAgent, GRPOConfig #GRPO agent
 from RL.dqn_agent import SeqDQNAgent, DQNConfig  # DQN agent
+from RL.dqn_agent import make_event_seq_as, make_event_seq_ht, shield_delta, compute_reward
 
 SEED = 20251221
 random.seed(SEED)
@@ -72,7 +72,23 @@ class RollingWindow:
             np.fromiter(self._bnpv, dtype=np.float32),
         )
 
+# This is for HT
+@dataclass
+class RollingWindowHT:
+    def __init__(self, max_events: int):
+        self.max_events = int(max_events)
+        self._bht = deque(maxlen=self.max_events)
+        self._bnpv = deque(maxlen=self.max_events)
 
+    def append(self, bht, bnpv):
+        self._bht.extend(np.asarray(bht, dtype=np.float32).tolist())
+        self._bnpv.extend(np.asarray(bnpv, dtype=np.float32).tolist())
+
+    def get(self):
+        return (
+            np.fromiter(self._bht, dtype=np.float32),
+            np.fromiter(self._bnpv, dtype=np.float32),
+        )
 # ----------------------------- metrics helpers -----------------------------
 def ecdf(x):
     x = np.asarray(x, dtype=np.float64)
@@ -194,7 +210,7 @@ def write_compact_tables(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct
     lines.append(r"\hline")
     lines.append(r"\end{tabular}")
     lines.append(
-        rf"\caption{{\textbf{{Single-trigger control summary (AS).}} "
+        rf"\caption{{\textbf{{Single-trigger control summary (AD and HT).}} "
         rf"Rates are in percent units with target $r^*={target_pct:.3f}\%$ and tolerance $\pm {tol_pct:.3f}\%$. "
         rf"InBand is the fraction of chunks within $|r-r^*|\le\tau$; MAE/P95$|e|$/ViolMag quantify rate tracking; "
         rf"StepRMS quantifies cut actuation; TT/AA/80--20 are mean signal efficiencies \emph{{conditioned on in-band chunks}}.}}"
@@ -261,6 +277,10 @@ def main():
     ap.add_argument("--dqn-train-steps-per-micro", type=int, default=1)
     ap.add_argument("--dqn-eps-min", type=float, default=0.05)
     ap.add_argument("--dqn-eps-decay", type=float, default=0.98)
+    ap.add_argument("--run-ht", action="store_true", help="also run HT trigger GRPO baselines/plots")
+    ap.add_argument("--ht-deltas", type=str, default="-2,-1,0,1,2")
+    ap.add_argument("--ht-step", type=float, default=1.0)
+
     args = ap.parse_args()
 
     if args.print_keys:
@@ -280,6 +300,10 @@ def main():
     Bnpv = d["Bnpv"]
     Tnpv = d["Tnpv"]
     Anpv = d["Anpv"]
+
+    Bht, Tht, Aht = d["Bht"], d["Tht"], d["Aht"]
+    if args.run_ht and (Bht is None or Tht is None or Aht is None):
+        raise SystemExit("HT arrays missing: need Bht/Tht/Aht in the input file.")
 
     # choose AS
     if args.as_dim == 2:
@@ -303,6 +327,17 @@ def main():
     win_lo = min(start_event, N - 1)
     win_hi = min(start_event + (100000 if args.control == "MC" else 10000), N)
     fixed_AS_cut = float(np.percentile(Bas[win_lo:win_hi], 99.75))
+    if args.run_ht:
+        fixed_Ht_cut = float(np.percentile(Bht[win_lo:win_hi], 99.75))
+
+        # clip range (use run tail percentiles, for DQN)
+        ht_lo = float(np.percentile(Bht[start_event:], 95.0))
+        ht_hi = float(np.percentile(Bht[start_event:], 99.99))
+        ht_mid = 0.5 * (ht_lo + ht_hi)
+        ht_span = max(1.0, ht_hi - ht_lo)
+
+        print(f"[HT] fixed={fixed_Ht_cut:.3f} clip=({ht_lo:.3f},{ht_hi:.3f}) ht_step={args.ht_step}")
+
 
     # clip range (use calibration window range)
     ref_as = Bas[win_lo:win_hi]
@@ -317,6 +352,14 @@ def main():
     # PD init
     AS_cut_pd = fixed_AS_cut
     pre_as_err = 0.0
+
+    # HT PD init (optional baseline; even if you don't plot yet, keep for completeness)
+    if args.run_ht:
+        Ht_cut_pd = fixed_Ht_cut
+        pre_ht_err = 0.0
+
+    # separate counter so HT GRPO doesn't mess with DQN epsilon schedule
+    ht_micro_counter = 0
 
     # GRPO init
     AS_cut_grpo = fixed_AS_cut
@@ -360,8 +403,67 @@ def main():
     dqn_losses = []
     dqn_rewards = []
 
-    # rolling window for event features
+    if args.run_ht:
+        HT_DELTAS = np.array([float(x) for x in args.ht_deltas.split(",")], dtype=np.float32)
+        HT_STEP = float(args.ht_step)
+        MAX_DELTA_HT = float(np.max(np.abs(HT_DELTAS))) * HT_STEP
+
+        near_widths_ht = (5.0, 10.0, 20.0)
+        feat_dim_ht = 10 + len(near_widths_ht)
+
+        cfg_ht = GRPOConfig(
+            lr=args.lr, beta_kl=args.beta_kl, ent_coef=args.ent_coef,
+            device="cpu", batch_size=256, train_epochs=2, ref_update_interval=200,
+        )
+        agent_ht = GRPOAgent(
+            seq_len=K, feat_dim=feat_dim_ht, n_actions=len(HT_DELTAS),
+            cfg=cfg_ht, seed=SEED
+        )
+
+        Ht_cut_grpo = fixed_Ht_cut
+        last_dht = 0.0
+        prev_bg_ht = None
+
+        # logs
+        R_ht_const_pct, R_ht_pd_pct, R_ht_grpo_pct = [], [], []
+        Cut_ht_pd, Cut_ht_grpo = [], []
+        TT_ht_const, TT_ht_pd, TT_ht_grpo = [], [], []
+        AA_ht_const, AA_ht_pd, AA_ht_grpo = [], [], []
+        ht_losses, ht_rewards = [], []
+
+        # ---------------- DQN agent (HT) ----------------
+        dqn_ht_cfg = DQNConfig(
+            lr=float(args.dqn_lr),
+            gamma=float(args.dqn_gamma),
+            batch_size=int(args.dqn_batch_size),
+            target_update=int(args.dqn_target_update),
+        )
+        dqn_ht = SeqDQNAgent(
+            seq_len=K, feat_dim=feat_dim_ht, n_actions=len(HT_DELTAS),
+            cfg=dqn_ht_cfg, seed=SEED
+        )
+
+        Ht_cut_dqn = fixed_Ht_cut
+        prev_bg_ht_dqn = None
+        last_dht_dqn = 0.0
+        dqn_ht_losses = []
+        dqn_ht_rewards = []
+
+        # add DQN logs for HT
+        R_ht_dqn_pct = []
+        Cut_ht_dqn = []
+        TT_ht_dqn = []
+        AA_ht_dqn = []
+
+        ht_dqn_step = 0
+
+
+
+
+    # rolling window for event features (AS)
     roll = RollingWindow(max_events=int(args.window_events_chunk_size * chunk_size))
+    if args.run_ht:
+        roll_ht = RollingWindowHT(max_events=int(args.window_events_chunk_size * chunk_size))
 
     # logs (background in percent units first)
     target = float(args.target)
@@ -392,7 +494,8 @@ def main():
         idx = np.arange(I, end)
         bas = Bas[idx]
         bnpv = Bnpv[idx]
-
+        if args.run_ht:
+            bht = Bht[idx]
         # signals for the chunk
         if matched_by_index:
             end_sig = min(end, len(Tas), len(Aas), len(Tnpv), len(Anpv))
@@ -406,6 +509,20 @@ def main():
             mask_aa = (Anpv >= npv_min) & (Anpv <= npv_max)
             sas_tt = Tas[mask_tt]
             sas_aa = Aas[mask_aa]
+        if args.run_ht:
+            if matched_by_index:
+                end_sig = min(end, len(Tht), len(Aht), len(Tnpv), len(Anpv))
+                idx_sig = np.arange(I, end_sig)
+                sht_tt = Tht[idx_sig]
+                sht_aa = Aht[idx_sig]
+            else:
+                npv_min = float(np.min(bnpv))
+                npv_max = float(np.max(bnpv))
+                mask_tt = (Tnpv >= npv_min) & (Tnpv <= npv_max)
+                mask_aa = (Anpv >= npv_min) & (Anpv <= npv_max)
+                sht_tt = Tht[mask_tt]
+                sht_aa = Aht[mask_aa]
+
 
         stride = max(500, int(args.inner_stride))
         n_micro = max(1, int(np.ceil((end - I) / stride)))
@@ -419,12 +536,174 @@ def main():
                 continue
 
             idxj = np.arange(j_lo, j_hi)
+
+            # --- micro-slice arrays ---
             bas_j = Bas[idxj]
             bnpv_j = Bnpv[idxj]
+            if args.run_ht:
+                bht_j = Bht[idxj]   # idxj (micro), NOT idx (chunk)
 
+            # --- update rolling windows ONCE per micro-step ---
             roll.append(bas_j, bnpv_j)
             bas_w, bnpv_w = roll.get()
-            # -------------------- DQN micro-step (AS) --------------------
+
+            if args.run_ht:
+                roll_ht.append(bht_j, bnpv_j)
+                bht_w, bnpv_w_ht = roll_ht.get()
+
+            # ============================================================
+            # HT micro-step: DQN + GRPO
+            # ============================================================
+                # ----- HT DQN -----
+                bg_before_ht_dqn = Sing_Trigger(bht_j, Ht_cut_dqn)
+                if prev_bg_ht_dqn is None:
+                    prev_bg_ht_dqn = bg_before_ht_dqn
+
+                obs_ht_dqn = make_event_seq_ht(
+                    bht=bht_w, bnpv=bnpv_w_ht,
+                    bg_rate=bg_before_ht_dqn,
+                    prev_bg_rate=prev_bg_ht_dqn,
+                    cut=Ht_cut_dqn,
+                    ht_mid=ht_mid, ht_span=ht_span,
+                    target=target, K=K,
+                    last_delta=last_dht_dqn,
+                    max_delta=MAX_DELTA_HT,
+                    near_widths=near_widths_ht,
+                )
+
+                eps_ht = max(float(args.dqn_eps_min), 1.0 * (float(args.dqn_eps_decay) ** ht_dqn_step))
+                a_ht_dqn = dqn_ht.act(obs_ht_dqn, eps=eps_ht)
+                dht_dqn = float(HT_DELTAS[a_ht_dqn] * HT_STEP)
+
+                sd = shield_delta(bg_before_ht_dqn, target, tol, MAX_DELTA_HT)
+                if sd is not None:
+                    dht_dqn = float(sd)
+
+                cut_next_ht_dqn = float(np.clip(Ht_cut_dqn + dht_dqn, ht_lo, ht_hi))
+                bg_after_ht_dqn = Sing_Trigger(bht_j, cut_next_ht_dqn)
+
+                tt_after_ht_dqn = Sing_Trigger(sht_tt, cut_next_ht_dqn)
+                aa_after_ht_dqn = Sing_Trigger(sht_aa, cut_next_ht_dqn)
+
+                obs_next_ht_dqn = make_event_seq_ht(
+                    bht=bht_w, bnpv=bnpv_w_ht,
+                    bg_rate=bg_after_ht_dqn,
+                    prev_bg_rate=bg_before_ht_dqn,
+                    cut=cut_next_ht_dqn,
+                    ht_mid=ht_mid, ht_span=ht_span,
+                    target=target, K=K,
+                    last_delta=dht_dqn,
+                    max_delta=MAX_DELTA_HT,
+                    near_widths=near_widths_ht,
+                )
+
+                r_ht_dqn = compute_reward(
+                    bg_rate=bg_after_ht_dqn,
+                    target=target, tol=tol,
+                    sig_rate_1=tt_after_ht_dqn,
+                    sig_rate_2=aa_after_ht_dqn,
+                    delta_applied=dht_dqn,
+                    max_delta=MAX_DELTA_HT,
+                    alpha=float(args.alpha),
+                    beta=float(args.beta),
+                    prev_bg_rate=bg_before_ht_dqn,
+                    gamma_stab=0.3,
+                )
+
+                dqn_ht.buf.push(obs_ht_dqn, int(a_ht_dqn), float(r_ht_dqn), obs_next_ht_dqn, done=False)
+
+                for _ in range(int(args.dqn_train_steps_per_micro)):
+                    loss_ht = dqn_ht.train_step()
+                    if loss_ht is not None:
+                        dqn_ht_losses.append(float(loss_ht))
+
+                Ht_cut_dqn = cut_next_ht_dqn
+                prev_bg_ht_dqn = bg_after_ht_dqn
+                last_dht_dqn = dht_dqn
+                dqn_ht_rewards.append(float(r_ht_dqn))
+                ht_dqn_step += 1
+
+                # ----- HT GRPO -----
+                bg_before_ht = Sing_Trigger(bht_j, Ht_cut_grpo)
+                if prev_bg_ht is None:
+                    prev_bg_ht = bg_before_ht
+
+                obs_ht = make_event_seq_ht(
+                    bht=bht_w, bnpv=bnpv_w_ht,
+                    bg_rate=bg_before_ht,
+                    prev_bg_rate=prev_bg_ht,
+                    cut=Ht_cut_grpo,
+                    ht_mid=ht_mid, ht_span=ht_span,
+                    target=target, K=K,
+                    last_delta=last_dht,
+                    max_delta=MAX_DELTA_HT,
+                    near_widths=near_widths_ht,
+                )
+
+                G = int(args.group_size)
+                acts_ht, old_logps_ht = agent_ht.sample_group_actions(
+                    obs_ht, group_size=G, temperature=float(args.temperature)
+                )
+
+                cand_rewards_ht = np.zeros(G, dtype=np.float32)
+                occ_mid_ht = float(near_occupancy(bht_j, Ht_cut_grpo, near_widths_ht)[1])  # width=10
+
+                for k in range(G):
+                    a = int(acts_ht[k])
+                    dht = float(HT_DELTAS[a] * HT_STEP)
+
+                    cut_next = float(np.clip(Ht_cut_grpo + dht, ht_lo, ht_hi))
+                    bg_after = Sing_Trigger(bht_j, cut_next)
+
+                    tt_after = Sing_Trigger(sht_tt, cut_next)
+                    aa_after = Sing_Trigger(sht_aa, cut_next)
+
+                    r = compute_reward(
+                        bg_rate=bg_after,
+                        target=target, tol=tol,
+                        sig_rate_1=tt_after,
+                        sig_rate_2=aa_after,
+                        delta_applied=dht,
+                        max_delta=MAX_DELTA_HT,
+                        alpha=float(args.alpha),
+                        beta=float(args.beta),
+                        prev_bg_rate=bg_before_ht,
+                        gamma_stab=0.3,
+                    )
+
+                    if args.occ_pen > 0:
+                        r -= float(args.occ_pen) * occ_mid_ht * (abs(dht) / (MAX_DELTA_HT + 1e-6))
+
+                    cand_rewards_ht[k] = float(r)
+
+                adv_ht = cand_rewards_ht - float(np.mean(cand_rewards_ht))
+                for k in range(G):
+                    agent_ht.buf.push(obs_ht, int(acts_ht[k]), float(old_logps_ht[k]), float(adv_ht[k]))
+
+                k_best = int(np.argmax(cand_rewards_ht))
+                a_exec = int(acts_ht[k_best])
+                dht_exec = float(HT_DELTAS[a_exec] * HT_STEP)
+
+                sd = shield_delta(bg_before_ht, target, tol, MAX_DELTA_HT)
+                if sd is not None:
+                    dht_exec = float(sd)
+
+                cut_next = float(np.clip(Ht_cut_grpo + dht_exec, ht_lo, ht_hi))
+                bg_after_exec = Sing_Trigger(bht_j, cut_next)
+
+                Ht_cut_grpo = cut_next
+                prev_bg_ht = bg_after_exec
+                last_dht = dht_exec
+
+                ht_micro_counter += 1
+                if ht_micro_counter % int(args.train_every) == 0:
+                    loss = agent_ht.update()
+                    if loss is not None:
+                        ht_losses.append(float(loss))
+
+            # ============================================================
+            # AS micro-step: DQN + GRPO  
+            # ============================================================
             bg_before_dqn = Sing_Trigger(bas_j, AS_cut_dqn)
             if prev_bg_dqn is None:
                 prev_bg_dqn = bg_before_dqn
@@ -435,20 +714,18 @@ def main():
                 prev_bg_rate=prev_bg_dqn,
                 cut=AS_cut_dqn,
                 as_mid=as_mid, as_span=as_span,
-                target=target,
-                K=K,
+                target=target, K=K,
                 last_delta=last_das_dqn,
                 max_delta=MAX_DELTA_AS,
                 near_widths=near_widths_as,
             )
 
-            step = micro_counter  # reuse your global micro counter
+            step = micro_counter
             eps = max(float(args.dqn_eps_min), 1.0 * (float(args.dqn_eps_decay) ** step))
 
             a_dqn = dqn_as.act(obs_dqn, eps=eps)
             das_dqn = float(AS_DELTAS[a_dqn] * AS_STEP)
 
-            # safety shield
             sd = shield_delta(bg_before_dqn, target, tol, MAX_DELTA_AS)
             if sd is not None:
                 das_dqn = float(sd)
@@ -456,7 +733,6 @@ def main():
             cut_next_dqn = float(np.clip(AS_cut_dqn + das_dqn, as_lo, as_hi))
             bg_after_dqn = Sing_Trigger(bas_j, cut_next_dqn)
 
-            # signal proxy (same as GRPO uses)
             tt_after_dqn = Sing_Trigger(sas_tt, cut_next_dqn)
             aa_after_dqn = Sing_Trigger(sas_aa, cut_next_dqn)
 
@@ -466,8 +742,7 @@ def main():
                 prev_bg_rate=bg_before_dqn,
                 cut=cut_next_dqn,
                 as_mid=as_mid, as_span=as_span,
-                target=target,
-                K=K,
+                target=target, K=K,
                 last_delta=das_dqn,
                 max_delta=MAX_DELTA_AS,
                 near_widths=near_widths_as,
@@ -475,8 +750,7 @@ def main():
 
             r_dqn = compute_reward(
                 bg_rate=bg_after_dqn,
-                target=target,
-                tol=tol,
+                target=target, tol=tol,
                 sig_rate_1=tt_after_dqn,
                 sig_rate_2=aa_after_dqn,
                 delta_applied=das_dqn,
@@ -494,36 +768,32 @@ def main():
                 if loss is not None:
                     dqn_losses.append(float(loss))
 
-            # advance DQN state
             AS_cut_dqn = cut_next_dqn
             prev_bg_dqn = bg_after_dqn
             last_das_dqn = das_dqn
             dqn_rewards.append(float(r_dqn))
 
+            # ----- AS GRPO -----
             bg_before = Sing_Trigger(bas_j, AS_cut_grpo)
             if prev_bg_as is None:
                 prev_bg_as = bg_before
 
             obs = make_event_seq_as(
-                bas=bas_w, bnpv=bnpv_w,
-                bg_rate=bg_before,
-                prev_bg_rate=prev_bg_as,
-                cut=AS_cut_grpo,
-                as_mid=as_mid, as_span=as_span,
-                target=target,
-                K=K,
-                last_delta=last_das,
-                max_delta=MAX_DELTA_AS,
-                near_widths=near_widths_as,
+            bas=bas_w, bnpv=bnpv_w,
+            bg_rate=bg_before,
+            prev_bg_rate=prev_bg_as,
+            cut=AS_cut_grpo,
+            as_mid=as_mid, as_span=as_span,
+            target=target, K=K,
+            last_delta=last_das,
+            max_delta=MAX_DELTA_AS,
+            near_widths=near_widths_as,
             )
 
-            # ---- GRPO group sampling ----
             G = int(args.group_size)
             acts, old_logps = agent.sample_group_actions(obs, group_size=G, temperature=float(args.temperature))
 
             cand_rewards = np.zeros(G, dtype=np.float32)
-
-            # occupancy proxy for optional penalty (computed on micro-step bg slice)
             occ_mid = float(near_occupancy(bas_j, AS_cut_grpo, near_widths_as)[1])  # w=0.5
 
             for k in range(G):
@@ -533,14 +803,12 @@ def main():
                 cut_next = float(np.clip(AS_cut_grpo + das, as_lo, as_hi))
                 bg_after = Sing_Trigger(bas_j, cut_next)
 
-                # micro-step signal proxy: evaluate on chunk-level signal arrays (stable / low-variance)
                 tt_after = Sing_Trigger(sas_tt, cut_next)
                 aa_after = Sing_Trigger(sas_aa, cut_next)
 
                 r = compute_reward(
                     bg_rate=bg_after,
-                    target=target,
-                    tol=tol,
+                    target=target, tol=tol,
                     sig_rate_1=tt_after,
                     sig_rate_2=aa_after,
                     delta_applied=das,
@@ -549,7 +817,7 @@ def main():
                     beta=float(args.beta),
                     prev_bg_rate=bg_before,
                     gamma_stab=0.3,
-                )
+            )
 
                 if args.occ_pen > 0:
                     r -= float(args.occ_pen) * occ_mid * (abs(das) / (MAX_DELTA_AS + 1e-6))
@@ -557,16 +825,13 @@ def main():
                 cand_rewards[k] = float(r)
 
             adv = cand_rewards - float(np.mean(cand_rewards))
-
             for k in range(G):
                 agent.buf.push(obs, int(acts[k]), float(old_logps[k]), float(adv[k]))
 
-            # execute best candidate (greedy over group)
             k_best = int(np.argmax(cand_rewards))
             a_exec = int(acts[k_best])
             das_exec = float(AS_DELTAS[a_exec] * AS_STEP)
 
-            # safety shield to avoid runaway when far from band
             sd = shield_delta(bg_before, target, tol, MAX_DELTA_AS)
             if sd is not None:
                 das_exec = float(sd)
@@ -585,53 +850,95 @@ def main():
                 loss = agent.update()
                 if loss is not None:
                     losses.append(float(loss))
+        
+        # ============================
+        # CHUNK-LEVEL logging (ONCE per chunk)
+        # ============================
 
-        # ---- end micro loop ----
-
-        # chunk-level rates/eff
+        # --- AD (AS trigger) rates for this chunk ---
         bg_const = Sing_Trigger(bas, fixed_AS_cut)
-        bg_pd = Sing_Trigger(bas, AS_cut_pd)
-        bg_grpo = Sing_Trigger(bas, AS_cut_grpo)
-        bg_dqn = Sing_Trigger(bas, AS_cut_dqn)
+        bg_grpo  = Sing_Trigger(bas, AS_cut_grpo)
+        bg_dqn   = Sing_Trigger(bas, AS_cut_dqn)
 
-        # PD update once per chunk
-        AS_cut_pd, pre_as_err = PD_controller2(bg_pd, pre_as_err, AS_cut_pd)
+        # --- PD update once per chunk ---
+        bg_pd_before = Sing_Trigger(bas, AS_cut_pd)
+        AS_cut_pd, pre_as_err = PD_controller2(bg_pd_before, pre_as_err, AS_cut_pd)
         AS_cut_pd = float(np.clip(AS_cut_pd, as_lo, as_hi))
+        bg_pd = Sing_Trigger(bas, AS_cut_pd)
 
+        # --- signal efficiencies for this chunk (same cuts as rates) ---
         tt_const = Sing_Trigger(sas_tt, fixed_AS_cut)
-        tt_pd = Sing_Trigger(sas_tt, AS_cut_pd)
+        aa_const = Sing_Trigger(sas_aa, fixed_AS_cut)
+
+        tt_pd  = Sing_Trigger(sas_tt, AS_cut_pd)
+        aa_pd  = Sing_Trigger(sas_aa, AS_cut_pd)
+
         tt_grpo = Sing_Trigger(sas_tt, AS_cut_grpo)
+        aa_grpo = Sing_Trigger(sas_aa, AS_cut_grpo)
+
         tt_dqn = Sing_Trigger(sas_tt, AS_cut_dqn)
         aa_dqn = Sing_Trigger(sas_aa, AS_cut_dqn)
 
-        aa_const = Sing_Trigger(sas_aa, fixed_AS_cut)
-        aa_pd = Sing_Trigger(sas_aa, AS_cut_pd)
-        aa_grpo = Sing_Trigger(sas_aa, AS_cut_grpo)
-
+        # --- append AD logs ---
         R_const_pct.append(bg_const)
         R_pd_pct.append(bg_pd)
         R_grpo_pct.append(bg_grpo)
         R_dqn_pct.append(bg_dqn)
 
-        Cut_dqn.append(AS_cut_dqn)
-        TT_dqn.append(tt_dqn)
-        AA_dqn.append(aa_dqn)
-
         Cut_pd.append(AS_cut_pd)
         Cut_grpo.append(AS_cut_grpo)
+        Cut_dqn.append(AS_cut_dqn)
 
-        TT_const.append(tt_const); TT_pd.append(tt_pd); TT_grpo.append(tt_grpo)
-        AA_const.append(aa_const); AA_pd.append(aa_pd); AA_grpo.append(aa_grpo)
+        TT_const.append(tt_const); TT_pd.append(tt_pd); TT_grpo.append(tt_grpo); TT_dqn.append(tt_dqn)
+        AA_const.append(aa_const); AA_pd.append(aa_pd); AA_grpo.append(aa_grpo); AA_dqn.append(aa_dqn)
 
         rewards.append(float(np.mean(micro_rewards)) if micro_rewards else np.nan)
 
+        # --- HT chunk-level logs (ONLY if enabled) ---
+        if args.run_ht:
+            bg_ht_const = Sing_Trigger(bht, fixed_Ht_cut)
+            bg_ht_grpo  = Sing_Trigger(bht, Ht_cut_grpo)
+            bg_ht_dqn   = Sing_Trigger(bht, Ht_cut_dqn)
+
+            bg_ht_pd_before = Sing_Trigger(bht, Ht_cut_pd)
+            Ht_cut_pd, pre_ht_err = PD_controller2(bg_ht_pd_before, pre_ht_err, Ht_cut_pd)
+            Ht_cut_pd = float(np.clip(Ht_cut_pd, ht_lo, ht_hi))
+            bg_ht_pd = Sing_Trigger(bht, Ht_cut_pd)
+
+            tt_ht_const = Sing_Trigger(sht_tt, fixed_Ht_cut)
+            aa_ht_const = Sing_Trigger(sht_aa, fixed_Ht_cut)
+
+            tt_ht_pd  = Sing_Trigger(sht_tt, Ht_cut_pd)
+            aa_ht_pd  = Sing_Trigger(sht_aa, Ht_cut_pd)
+
+            tt_ht_grpo = Sing_Trigger(sht_tt, Ht_cut_grpo)
+            aa_ht_grpo = Sing_Trigger(sht_aa, Ht_cut_grpo)
+
+            tt_ht_dqn = Sing_Trigger(sht_tt, Ht_cut_dqn)
+            aa_ht_dqn = Sing_Trigger(sht_aa, Ht_cut_dqn)
+
+            R_ht_const_pct.append(bg_ht_const)
+            R_ht_pd_pct.append(bg_ht_pd)
+            R_ht_grpo_pct.append(bg_ht_grpo)
+            R_ht_dqn_pct.append(bg_ht_dqn)
+
+            Cut_ht_pd.append(Ht_cut_pd)
+            Cut_ht_grpo.append(Ht_cut_grpo)
+            Cut_ht_dqn.append(Ht_cut_dqn)
+
+            TT_ht_const.append(tt_ht_const); TT_ht_pd.append(tt_ht_pd); TT_ht_grpo.append(tt_ht_grpo); TT_ht_dqn.append(tt_ht_dqn)
+            AA_ht_const.append(aa_ht_const); AA_ht_pd.append(aa_ht_pd); AA_ht_grpo.append(aa_ht_grpo); AA_ht_dqn.append(aa_ht_dqn)
+
         if t % 5 == 0:
             print(f"[chunk {t:4d}] "
-                f"AS bg% const={bg_const:.3f} pid={bg_pd:.3f} dqn={bg_dqn:.3f} grpo={bg_grpo:.3f} "
-                f"| cut pid={AS_cut_pd:.5f} dqn={AS_cut_dqn:.5f} grpo={AS_cut_grpo:.5f} "
-                f"| grpo_reward={rewards[-1]} grpo_loss={losses[-1] if losses else None} "
-                f"| dqn_loss={dqn_losses[-1] if dqn_losses else None}")
+                  f"AS bg% const={bg_const:.3f} pd={bg_pd:.3f} dqn={bg_dqn:.3f} grpo={bg_grpo:.3f} "
+                  f"| cut pd={AS_cut_pd:.5f} dqn={AS_cut_dqn:.5f} grpo={AS_cut_grpo:.5f} "
+                  f"| grpo_reward={rewards[-1]} grpo_loss={losses[-1] if losses else None} "
+                  f"| dqn_loss={dqn_losses[-1] if dqn_losses else None}")
 
+        
+        
+    
     # ----------------------------- arrays -----------------------------
     R_const_pct = np.asarray(R_const_pct, dtype=np.float64)
     R_pd_pct = np.asarray(R_pd_pct, dtype=np.float64)
@@ -650,7 +957,36 @@ def main():
     TT_dqn    = np.asarray(TT_dqn, dtype=np.float64)
     AA_dqn    = np.asarray(AA_dqn, dtype=np.float64)
 
+    # ----------------------------- arrays (HT) -----------------------------
+    if args.run_ht:
+        R_ht_const_pct = np.asarray(R_ht_const_pct, dtype=np.float64)
+        R_ht_pd_pct    = np.asarray(R_ht_pd_pct, dtype=np.float64)
+        R_ht_dqn_pct   = np.asarray(R_ht_dqn_pct, dtype=np.float64)
+        R_ht_grpo_pct  = np.asarray(R_ht_grpo_pct, dtype=np.float64)
+
+        Cut_ht_pd   = np.asarray(Cut_ht_pd, dtype=np.float64)
+        Cut_ht_dqn  = np.asarray(Cut_ht_dqn, dtype=np.float64)
+        Cut_ht_grpo = np.asarray(Cut_ht_grpo, dtype=np.float64)
+
+        TT_ht_const = np.asarray(TT_ht_const, dtype=np.float64)
+        TT_ht_pd    = np.asarray(TT_ht_pd, dtype=np.float64)
+        TT_ht_dqn   = np.asarray(TT_ht_dqn, dtype=np.float64)
+        TT_ht_grpo  = np.asarray(TT_ht_grpo, dtype=np.float64)
+
+        AA_ht_const = np.asarray(AA_ht_const, dtype=np.float64)
+        AA_ht_pd    = np.asarray(AA_ht_pd, dtype=np.float64)
+        AA_ht_dqn   = np.asarray(AA_ht_dqn, dtype=np.float64)
+        AA_ht_grpo  = np.asarray(AA_ht_grpo, dtype=np.float64)
+
     time = np.linspace(0, 1, len(R_const_pct))
+
+    # HT time and kHz
+    if args.run_ht: 
+        time_ht = np.linspace(0, 1, len(R_ht_const_pct))
+        R_ht_const_khz = R_ht_const_pct * RATE_SCALE_KHZ
+        R_ht_pd_khz    = R_ht_pd_pct    * RATE_SCALE_KHZ
+        R_ht_dqn_khz   = R_ht_dqn_pct   * RATE_SCALE_KHZ
+        R_ht_grpo_khz  = R_ht_grpo_pct  * RATE_SCALE_KHZ
 
     # kHz for plots
     R_const_khz = R_const_pct * RATE_SCALE_KHZ
@@ -709,6 +1045,43 @@ def main():
              ylabel="Relative Cumulative Efficiency", title="HToAATo4B", outpath=outdir/"C_aa_eff_all_methods")
 
     # ----------------------------- core plots -----------------------------
+    # ----------------------------- HT core plots -----------------------------
+    if args.run_ht:
+        # HT rate plot
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(time_ht, R_ht_const_khz, linestyle="--", linewidth=2.4, label="Constant")
+        ax.plot(time_ht, R_ht_pd_khz,    linewidth=2.4, label="PD")
+        ax.plot(time_ht, R_ht_dqn_khz,   linewidth=3.0, linestyle=(0, (8, 2, 2, 2)),
+            marker="o", markersize=4, markevery=6, label="DQN")
+        ax.plot(time_ht, R_ht_grpo_khz,  linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), label="GRPO")
+
+        ax.axhline(upper_tol_khz, linestyle="--", linewidth=1.2)
+        ax.axhline(lower_tol_khz, linestyle="--", linewidth=1.2)
+        ax.fill_between(time_ht, lower_tol_khz, upper_tol_khz, alpha=0.12, label="Tolerance band")
+
+        ax.set_xlabel("Time (Fraction of Run)")
+        ax.set_ylabel("Background rate [kHz]")
+        ax.set_ylim(0, 200)
+        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.legend(loc="best", frameon=True, title="HT Trigger")
+        add_cms_header(fig, run_label=run_label)
+        save_png(fig, str(outdir / "bht_rate_all_methods"))
+        plt.close(fig)
+
+        # HT cut plot
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(time_ht, Cut_ht_pd,   linewidth=2.4, label="PD")
+        ax.plot(time_ht, Cut_ht_dqn,  linewidth=2.8, linestyle=(0, (8, 2, 2, 2)), label="DQN")
+        ax.plot(time_ht, Cut_ht_grpo, linewidth=3.0, linestyle=(0, (10, 2, 2, 2)), label="GRPO")
+        ax.axhline(y=fixed_Ht_cut, color="gray", linestyle="--", linewidth=1.5, label="fixed_Ht_cut")
+        ax.set_xlabel("Time (Fraction of Run)")
+        ax.set_ylabel("Ht_cut")
+        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.legend(loc="best", frameon=True, title="HT Cut")
+        add_cms_header(fig, run_label=run_label)
+        save_png(fig, str(outdir / "ht_cut_all_methods"))
+        plt.close(fig)
+
     # rate plot (main)
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(time, R_const_khz, linestyle="--", linewidth=2.4, label="Constant")
@@ -845,25 +1218,42 @@ def main():
                                   np.full_like(Cut_pd, fixed_AS_cut), target, tol)
 
     rows = []
-    def add_row(method, dct):
-        r = {"Trigger": "AD", "Method": method}
+    def add_row(trigger, method, dct):
+        r = {"Trigger": trigger, "Method": method}
         r.update(dct)
         rows.append(r)
 
-    sum_dq = summarize_compact(R_dqn_pct, TT_dqn, AA_dqn, Cut_dqn, target, tol)
-    add_row("Constant", sum_const)
-    add_row("PD", sum_pd)
-    add_row("DQN", sum_dq)
-    add_row("GRPO", sum_gr)
+    # ---- AD rows ----
+    sum_const_ad = summarize_compact(R_const_pct, TT_const, AA_const,
+                                 np.full_like(Cut_pd, fixed_AS_cut), target, tol)
+    sum_pd_ad  = summarize_compact(R_pd_pct,  TT_pd,  AA_pd,  Cut_pd,  target, tol)
+    sum_dqn_ad = summarize_compact(R_dqn_pct, TT_dqn, AA_dqn, Cut_dqn, target, tol)
+    sum_gr_ad  = summarize_compact(R_grpo_pct,TT_grpo,AA_grpo,Cut_grpo,target, tol)
 
-    out_csv = tables_dir / "grpo_as_compact_summary.csv"
-    out_tex = tables_dir / "grpo_as_compact_summary.tex"
+    add_row("AD", "Constant", sum_const_ad)
+    add_row("AD", "PD",       sum_pd_ad)
+    add_row("AD", "DQN",      sum_dqn_ad)
+    add_row("AD", "GRPO",     sum_gr_ad)
+
+    # ---- HT rows ----
+    if args.run_ht:
+        sum_const_ht = summarize_compact(R_ht_const_pct, TT_ht_const, AA_ht_const,
+                                     np.full_like(Cut_ht_pd, fixed_Ht_cut), target, tol)
+        sum_pd_ht  = summarize_compact(R_ht_pd_pct,  TT_ht_pd,  AA_ht_pd,  Cut_ht_pd,  target, tol)
+        sum_dqn_ht = summarize_compact(R_ht_dqn_pct, TT_ht_dqn, AA_ht_dqn, Cut_ht_dqn, target, tol)
+        sum_gr_ht  = summarize_compact(R_ht_grpo_pct,TT_ht_grpo,AA_ht_grpo,Cut_ht_grpo,target, tol)
+
+        add_row("HT", "Constant", sum_const_ht)
+        add_row("HT", "PD",       sum_pd_ht)
+        add_row("HT", "DQN",      sum_dqn_ht)
+        add_row("HT", "GRPO",     sum_gr_ht)
+
+    out_csv = tables_dir / "single_trigger_compact_summary.csv"
+    out_tex = tables_dir / "single_trigger_compact_summary.tex"
     write_compact_tables(rows, out_csv, out_tex, target_pct=target, tol_pct=tol)
 
-    print(f"\n[OK] Saved outputs to: {outdir}")
     print(f"[OK] Wrote: {out_csv}")
     print(f"[OK] Wrote: {out_tex}")
-    print(f"[OK] Extra plots: {plots_dir}")
 
 
 if __name__ == "__main__":

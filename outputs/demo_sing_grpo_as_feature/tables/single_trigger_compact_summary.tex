@@ -1,0 +1,26 @@
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.10}
+\begin{tabular}{llrrrrrrrr}
+\hline
+Trigger & Method & InBand$\uparrow$ & MAE$\downarrow$ & P95$|e|$$\downarrow$ & ViolMag$\downarrow$ & StepRMS$\downarrow$ & TT$\uparrow$ & AA$\uparrow$ & 80/20$\uparrow$ \\
+\hline
+\multicolumn{10}{l}{\textbf{AD trigger}} \\
+AD & Constant & 0.016 & 0.164 & 0.216 & 0.139 & \textbf{0.000} & 90.201 & 17.098 & 31.719 \\
+AD & PD & 0.457 & 0.031 & 0.068 & 0.012 & 0.615 & 93.537 & 22.506 & 36.712 \\
+AD & DQN & 0.823 & 0.015 & 0.034 & 0.001 & 2.554 & \textbf{93.981} & \textbf{22.962} & \textbf{37.166} \\
+AD & GRPO & \textbf{0.941} & \textbf{0.011} & \textbf{0.026} & \textbf{3.92e-04} & 2.498 & 93.735 & 22.559 & 36.794 \\
+\midrule
+\multicolumn{10}{l}{\textbf{HT trigger}} \\
+HT & Constant & 0.016 & 0.179 & 0.236 & 0.154 & \textbf{0.000} & 94.457 & 18.398 & 33.610 \\
+HT & PD & 0.220 & 0.044 & 0.083 & 0.022 & 0.826 & 97.563 & 23.889 & 38.624 \\
+HT & DQN & 0.855 & 0.014 & 0.034 & 0.001 & 4.471 & 97.946 & 25.741 & 40.182 \\
+HT & GRPO & \textbf{0.898} & \textbf{0.011} & \textbf{0.028} & \textbf{6.25e-04} & 3.566 & \textbf{98.066} & \textbf{26.221} & \textbf{40.590} \\
+\midrule
+\hline
+\end{tabular}
+\caption{\textbf{Single-trigger control summary (AD and HT).} Rates are in percent units with target $r^*=0.250\%$ and tolerance $\pm 0.025\%$. InBand is the fraction of chunks within $|r-r^*|\le\tau$; MAE/P95$|e|$/ViolMag quantify rate tracking; StepRMS quantifies cut actuation; TT/AA/80--20 are mean signal efficiencies \emph{conditioned on in-band chunks}.}
+\label{tab:grpo_as_summary}
+\end{table}
