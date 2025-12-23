@@ -682,3 +682,24 @@ def compute_operating_point_windows_separate(
         np.asarray(tpr0_tt_pd), np.asarray(tpr0_tt_dqn),
         np.asarray(tpr0_aa_pd), np.asarray(tpr0_aa_dqn),
     )
+
+
+
+
+
+
+
+def cummean(x):
+    x = np.asarray(x, dtype=np.float64)
+    return np.cumsum(x) / np.arange(1, len(x) + 1)
+
+def rel_to_t0(x):
+    x = np.asarray(x, dtype=np.float64)
+    return x / (x[0] + 1e-12)
+def near_occupancy(x, cut, widths):
+    x = np.asarray(x, dtype=np.float32)
+    out = []
+    for w in widths:
+        out.append(float(np.mean(np.abs(x - cut) <= float(w))))
+    return np.array(out, dtype=np.float32)
+

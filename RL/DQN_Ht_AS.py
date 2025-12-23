@@ -201,13 +201,13 @@ def main():
     rewards_as = []   # AS reward per chunk (t)
 
     # ------------------------- logs (HT) -------------------------
-    R1_ht, R2_ht, R3_ht = [], [], []                  # background % (const, PD, DQN)
+    R1_ht, R2_ht, R3_ht = [], [], []                  # background % (const, PID, DQN)
     Ht_pd_hist, Ht_dqn_hist = [], []
     L_tt_ht_const, L_tt_ht_pd, L_tt_ht_dqn = [], [], []
     L_aa_ht_const, L_aa_ht_pd, L_aa_ht_dqn = [], [], []
 
     # ------------------------- logs (AS) -------------------------
-    R1_as, R2_as, R3_as = [], [], []                  # background % (const, PD, DQN)
+    R1_as, R2_as, R3_as = [], [], []                  # background % (const, PID, DQN)
     As_pd_hist, As_dqn_hist = [], []
     L_tt_as_const, L_tt_as_pd, L_tt_as_dqn = [], [], []
     L_aa_as_const, L_aa_as_pd, L_aa_as_dqn = [], [], []
@@ -261,7 +261,7 @@ def main():
         aa_pd_ht    = Sing_Trigger(sht_aa, Ht_cut_pd)
         aa_dqn_ht   = Sing_Trigger(sht_aa, Ht_cut_dqn)
 
-        # PD update HT
+        # PID update HT
         Ht_cut_pd, pre_ht_err = PD_controller1(bg_pd_ht, pre_ht_err, Ht_cut_pd)
         Ht_cut_pd = float(np.clip(Ht_cut_pd, ht_lo, ht_hi))
 
@@ -336,7 +336,7 @@ def main():
         aa_pd_as    = Sing_Trigger(sas_aa, AS_cut_pd)
         aa_dqn_as   = Sing_Trigger(sas_aa, AS_cut_dqn)
 
-        # PD update AS
+        # PID update AS
         AS_cut_pd, pre_as_err = PD_controller2(bg_pd_as, pre_as_err, AS_cut_pd)
         AS_cut_pd = float(np.clip(AS_cut_pd, as_lo, as_hi))
 
@@ -516,7 +516,7 @@ def main():
     # =========================================================
     # (2) HT cut evolution
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(time, Ht_pd_hist,  color="mediumblue", linewidth=2.0, label="PD Controller")
+    ax.plot(time, Ht_pd_hist,  color="mediumblue", linewidth=2.0, label="PID Controller")
     ax.plot(time, Ht_dqn_hist, color="tab:purple", label="DQN", **DQN_STYLE)
     ax.axhline(y=fixed_Ht_cut, color="gray", linestyle="--", linewidth=1.5, label="fixed_Ht_cut")
     ax.set_xlabel("Time (Fraction of Run)", loc="center")
@@ -542,9 +542,9 @@ def main():
     ax.plot(time, rel_to_t0(aa_c_const), color=colors_ht["HToAATo4B"], **styles["Constant"],
             label=fr"Constant Menu, HToAATo4B ($\epsilon[t_0]={aa_c_const[0]:.2f}\%$)")
     ax.plot(time, rel_to_t0(tt_c_pd), color=colors_ht["ttbar"], **styles["PD"],
-            label=fr"PD Controller, ttbar ($\epsilon[t_0]={tt_c_pd[0]:.2f}\%$)")
+            label=fr"PID Controller, ttbar ($\epsilon[t_0]={tt_c_pd[0]:.2f}\%$)")
     ax.plot(time, rel_to_t0(aa_c_pd), color=colors_ht["HToAATo4B"], **styles["PD"],
-            label=fr"PD Controller, HToAATo4B ($\epsilon[t_0]={aa_c_pd[0]:.2f}\%$)")
+            label=fr"PID Controller, HToAATo4B ($\epsilon[t_0]={aa_c_pd[0]:.2f}\%$)")
     ax.plot(time, rel_to_t0(tt_c_dqn), color=colors_ht["ttbar"],
             label=fr"DQN, ttbar ($\epsilon[t_0]={tt_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
     ax.plot(time, rel_to_t0(aa_c_dqn), color=colors_ht["HToAATo4B"],
@@ -565,9 +565,9 @@ def main():
     ax.plot(time, rel_to_t0(L_aa_ht_const), color=colors_ht["HToAATo4B"], **styles["Constant"],
             label=fr"Constant Menu, HToAATo4B ($\epsilon[t_0]={L_aa_ht_const[0]:.2f}\%$)")
     ax.plot(time, rel_to_t0(L_tt_ht_pd), color=colors_ht["ttbar"], **styles["PD"],
-            label=fr"PD Controller, ttbar ($\epsilon[t_0]={L_tt_ht_pd[0]:.2f}\%$)")
+            label=fr"PID Controller, ttbar ($\epsilon[t_0]={L_tt_ht_pd[0]:.2f}\%$)")
     ax.plot(time, rel_to_t0(L_aa_ht_pd), color=colors_ht["HToAATo4B"], **styles["PD"],
-            label=fr"PD Controller, HToAATo4B ($\epsilon[t_0]={L_aa_ht_pd[0]:.2f}\%$)")
+            label=fr"PID Controller, HToAATo4B ($\epsilon[t_0]={L_aa_ht_pd[0]:.2f}\%$)")
     ax.plot(time, rel_to_t0(L_tt_ht_dqn), color=colors_ht["ttbar"], 
             label=fr"DQN, ttbar ($\epsilon[t_0]={L_tt_ht_dqn[0]:.2f}\%$)", **DQN_STYLE)
     ax.plot(time, rel_to_t0(L_aa_ht_dqn), color=colors_ht["HToAATo4B"], 
@@ -641,9 +641,9 @@ def main():
     ax.plot(time_as, rel_to_t0(aa_c_const), color=colors_ad["HToAATo4B"], **styles["Constant"],
             label=fr"Constant Menu, HToAATo4B ($\epsilon[t_0]={aa_c_const[0]:.2f}\%$)")
     ax.plot(time_as, rel_to_t0(tt_c_pd), color=colors_ad["ttbar"], **styles["PD"],
-            label=fr"PD Controller, ttbar ($\epsilon[t_0]={tt_c_pd[0]:.2f}\%$)")
+            label=fr"PID Controller, ttbar ($\epsilon[t_0]={tt_c_pd[0]:.2f}\%$)")
     ax.plot(time_as, rel_to_t0(aa_c_pd), color=colors_ad["HToAATo4B"], **styles["PD"],
-            label=fr"PD Controller, HToAATo4B ($\epsilon[t_0]={aa_c_pd[0]:.2f}\%$)")
+            label=fr"PID Controller, HToAATo4B ($\epsilon[t_0]={aa_c_pd[0]:.2f}\%$)")
     ax.plot(time_as, rel_to_t0(tt_c_dqn), color=colors_ad["ttbar"],
             label=fr"DQN, ttbar ($\epsilon[t_0]={tt_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
     ax.plot(time_as, rel_to_t0(aa_c_dqn), color=colors_ad["HToAATo4B"], 
@@ -665,9 +665,9 @@ def main():
     ax.plot(time_as, rel_to_t0(L_aa_as_const), color=colors_ad["HToAATo4B"], **styles["Constant"],
             label=fr"Constant Menu, HToAATo4B ($\epsilon[t_0]={L_aa_as_const[0]:.2f}\%$)")
     ax.plot(time_as, rel_to_t0(L_tt_as_pd), color=colors_ad["ttbar"], **styles["PD"],
-            label=fr"PD Controller, ttbar ($\epsilon[t_0]={L_tt_as_pd[0]:.2f}\%$)")
+            label=fr"PID Controller, ttbar ($\epsilon[t_0]={L_tt_as_pd[0]:.2f}\%$)")
     ax.plot(time_as, rel_to_t0(L_aa_as_pd), color=colors_ad["HToAATo4B"], **styles["PD"],
-            label=fr"PD Controller, HToAATo4B ($\epsilon[t_0]={L_aa_as_pd[0]:.2f}\%$)")
+            label=fr"PID Controller, HToAATo4B ($\epsilon[t_0]={L_aa_as_pd[0]:.2f}\%$)")
     ax.plot(time_as, rel_to_t0(L_tt_as_dqn), color=colors_ad["ttbar"], linewidth=2.2, linestyle="dashdot",
             label=fr"DQN, ttbar ($\epsilon[t_0]={L_tt_as_dqn[0]:.2f}\%$)")
     ax.plot(time_as, rel_to_t0(L_aa_as_dqn), color=colors_ad["HToAATo4B"], linewidth=2.2, linestyle="dashdot",

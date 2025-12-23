@@ -2,21 +2,35 @@
 """
 demo_single_trigger_grpo_as_feature.py
 
-AS-only single-trigger control: Constant vs PD vs GRPO (bandit-style), plus
-paper-friendly diagnostics to *showcase GRPO is better*:
+Single-trigger threshold control with event-sequence features.
 
+Main focus: AD/AS trigger control (AS_cut) comparing:
+  - Constant menu threshold (fixed from calibration window)
+  - PD baseline (uses PD_controller2 for AS)
+  - DQN baseline (sequence DQN; epsilon-greedy)
+  - GRPO (bandit-style group sampling + policy update)
+
+Optional: also run the HT trigger control (Ht_cut) when --run-ht is set:
+  - PD baseline for HT uses PD_controller1 for HT specifically
+  - DQN baseline (sequence DQN)
+  - GRPO (bandit-style)
+
+Create summary table for paper:
 1) Compact summary table (CSV + LaTeX) with:
    - InBand (↑), MAE (↓), P95|e| (↓), ViolMag (↓), StepRMS (↓),
-     TT_inband (↑), AA_inband (↑), mix_80_20 (↑)
+     TT_inband (↑), AA_inband (↑), Mix80_20 (↑)
 2) CDF of |rate error| (kHz) for PD vs GRPO
-3) Running in-band fraction vs time
+3) Running in-band fraction vs time (PD vs GRPO)
 4) Cut-step magnitude histogram |Δcut| (PD vs GRPO)
 5) In-band efficiency bars (PD vs GRPO)
 
 Notes:
-- Rates are in *percent units* from Sing_Trigger: target r*=0.25 (%).
+- Rates are in *percent units* from Sing_Trigger: target r* = 0.25 (%).
 - Convert to kHz via r_kHz = 400 * r_%.
 - If your tolerance band is [90,110] kHz around 100 kHz, use tol=0.025 (%).
+- Controller mapping (IMPORTANT):
+    * AS_cut (AD trigger) PD baseline  -> PD_controller2
+    * Ht_cut (HT trigger) PD baseline  -> PD_controller1
 """
 
 import argparse
@@ -29,7 +43,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from controllers import PD_controller1, PD_controller2
 from triggers import Sing_Trigger
-from RL.utils import add_cms_header, save_png, print_h5_tree, read_any_h5
+from RL.utils import add_cms_header, save_png, print_h5_tree, read_any_h5, cummean, rel_to_t0, near_occupancy
 from RL.grpo_agent import GRPOAgent, GRPOConfig #GRPO agent
 from RL.dqn_agent import SeqDQNAgent, DQNConfig  # DQN agent
 from RL.dqn_agent import make_event_seq_as, make_event_seq_ht, shield_delta, compute_reward
@@ -39,20 +53,6 @@ random.seed(SEED)
 np.random.seed(SEED)
 
 RATE_SCALE_KHZ = 400.0
-
-def cummean(x):
-    x = np.asarray(x, dtype=np.float64)
-    return np.cumsum(x) / np.arange(1, len(x) + 1)
-
-def rel_to_t0(x):
-    x = np.asarray(x, dtype=np.float64)
-    return x / (x[0] + 1e-12)
-def near_occupancy(x, cut, widths):
-    x = np.asarray(x, dtype=np.float32)
-    out = []
-    for w in widths:
-        out.append(float(np.mean(np.abs(x - cut) <= float(w))))
-    return np.array(out, dtype=np.float32)
 
 
 @dataclass
@@ -91,6 +91,7 @@ class RollingWindowHT:
         )
 # ----------------------------- metrics helpers -----------------------------
 def ecdf(x):
+    """Creating error cdf"""
     x = np.asarray(x, dtype=np.float64)
     x = x[np.isfinite(x)]
     if x.size == 0:
@@ -227,6 +228,90 @@ def running_mean_bool(mask, w=7):
     k = np.ones(int(w), dtype=np.float64)
     return np.convolve(m, k, mode="same") / np.convolve(np.ones_like(m), k, mode="same")
 
+def plot_cdf_abs_err_multi(rate_khz_by_method, target_khz, tol_khz, title, outpath, run_label):
+    """
+    rate_khz_by_method: dict(name -> 1D array of rates in kHz)
+    """
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    for name, r_khz in rate_khz_by_method.items():
+        e = np.abs(np.asarray(r_khz, dtype=np.float64) - float(target_khz))
+        x, y = ecdf(e)
+        if x.size:
+            ax.plot(x, y, linewidth=2.2, label=name)
+
+    ax.axvline(float(tol_khz), linestyle="--", linewidth=1.6, label=f"Tolerance = {tol_khz:.1f} kHz")
+    ax.set_xlabel(r"$|r-r^*|$ [kHz]")
+    ax.set_ylabel("CDF")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True, title=title)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(outpath))
+    plt.close(fig)
+
+
+def plot_running_inband_multi(time, inband_by_method, w, title, outpath, run_label):
+    """
+    inband_by_method: dict(name -> boolean mask per chunk)
+    """
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    for name, m in inband_by_method.items():
+        ax.plot(time, running_mean_bool(m, w=int(w)), linewidth=2.2, label=f"{name} (w={int(w)})")
+
+    ax.set_xlabel("Time (Fraction of Run)")
+    ax.set_ylabel("Running in-band fraction")
+    ax.set_ylim(0.0, 1.05)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True, title=title)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(outpath))
+    plt.close(fig)
+
+
+def plot_cut_step_hist_multi(cut_by_method, xlabel, title, outpath, run_label, bins=30):
+    """
+    cut_by_method: dict(name -> 1D cut history)
+    """
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    for name, c in cut_by_method.items():
+        c = np.asarray(c, dtype=np.float64)
+        dc = np.diff(c) if c.size >= 2 else np.array([], dtype=np.float64)
+        if dc.size:
+            ax.hist(np.abs(dc), bins=int(bins), alpha=0.50, label=name)
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Count")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.legend(loc="best", frameon=True, title=title)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(outpath))
+    plt.close(fig)
+
+
+def plot_inband_eff_bars_multi(summary_by_method, title, outpath, run_label):
+    """
+    summary_by_method: dict(name -> summarize_compact(...) dict)
+    """
+    labels = ["ttbar", "HToAATo4B", "80/20"]
+    keys   = ["TT_inband", "AA_inband", "Mix80_20"]
+    methods = list(summary_by_method.keys())
+
+    vals = np.array([[summary_by_method[m][k] for k in keys] for m in methods], dtype=np.float64)  # (M,3)
+
+    x = np.arange(len(labels))
+    bw = 0.80 / max(1, len(methods))  # fill 80% of tick width
+
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    for i, m in enumerate(methods):
+        ax.bar(x - 0.40 + (i + 0.5) * bw, vals[i], width=bw, label=m)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Mean signal efficiency (in-band)")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True, title=title)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(outpath))
+    plt.close(fig)
 
 # ----------------------------- main -----------------------------
 def main():
@@ -1005,7 +1090,6 @@ def main():
     upper_tol_khz = target_khz + tol_khz
     lower_tol_khz = target_khz - tol_khz
 
-    import matplotlib.pyplot as plt
 
     def plot_rel_local(time, const, pid, dqn, grpo, ylabel, title, outpath):
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -1056,7 +1140,7 @@ def main():
         # HT rate plot
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.plot(time_ht, R_ht_const_khz, linestyle="--", linewidth=2.4, label="Constant")
-        ax.plot(time_ht, R_ht_pd_khz,    linewidth=2.4, label="PD")
+        ax.plot(time_ht, R_ht_pd_khz,    linewidth=2.4, label="PID")
         ax.plot(time_ht, R_ht_dqn_khz,   linewidth=3.0, linestyle=(0, (8, 2, 2, 2)),
             marker="o", markersize=4, markevery=6, label="DQN")
         ax.plot(time_ht, R_ht_grpo_khz,  linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), label="GRPO")
@@ -1076,7 +1160,7 @@ def main():
 
         # HT cut plot
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(time_ht, Cut_ht_pd,   linewidth=2.4, label="PD")
+        ax.plot(time_ht, Cut_ht_pd,   linewidth=2.4, label="PID")
         ax.plot(time_ht, Cut_ht_dqn,  linewidth=2.8, linestyle=(0, (8, 2, 2, 2)), label="DQN")
         ax.plot(time_ht, Cut_ht_grpo, linewidth=3.0, linestyle=(0, (10, 2, 2, 2)), label="GRPO")
         ax.axhline(y=fixed_Ht_cut, color="gray", linestyle="--", linewidth=1.5, label="fixed_Ht_cut")
@@ -1091,7 +1175,7 @@ def main():
     # rate plot (main)
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(time, R_const_khz, linestyle="--", linewidth=2.4, label="Constant")
-    ax.plot(time, R_pd_khz, linewidth=2.4, label="PD")
+    ax.plot(time, R_pd_khz, linewidth=2.4, label="PID")
     ax.plot(time, R_dqn_khz, linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), marker="o",
             markersize=4, markevery=6, label="DQN")
     ax.plot(time, R_grpo_khz, linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), label="GRPO")
@@ -1111,7 +1195,7 @@ def main():
 
     # cut evolution
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(time, Cut_pd, linewidth=2.4, label="PD")
+    ax.plot(time, Cut_pd, linewidth=2.4, label="PID")
     ax.plot(time, Cut_grpo, linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), label="GRPO")
     ax.axhline(y=fixed_AS_cut, color="gray", linestyle="--", linewidth=1.5, label="fixed_AS_cut")
     ax.set_xlabel("Time (Fraction of Run)")
@@ -1144,79 +1228,103 @@ def main():
         save_png(fig, str(outdir / "grpo_loss_as"))
         plt.close(fig)
 
-    # ----------------------------- showcase plots (paper) -----------------------------
-    # 1) CDF of absolute error (kHz): PD vs GRPO
-    e_pd = np.abs(R_pd_khz - target_khz)
-    e_gr = np.abs(R_grpo_khz - target_khz)
-    x1, y1 = ecdf(e_pd)
-    x2, y2 = ecdf(e_gr)
-
-    fig, ax = plt.subplots(figsize=(8, 5.2))
-    ax.plot(x1, y1, linewidth=2.2, label="PD")
-    ax.plot(x2, y2, linewidth=2.2, label="GRPO")
-    ax.axvline(tol_khz, linestyle="--", linewidth=1.6, label=f"Tolerance = {tol_khz:.1f} kHz")
-    ax.set_xlabel(r"$|r-r^*|$ [kHz]")
-    ax.set_ylabel("CDF")
-    ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True)
-    add_cms_header(fig, run_label=run_label)
-    save_png(fig, str(plots_dir / "cdf_abs_err_as_pd_vs_grpo"))
-    plt.close(fig)
-
-    # 2) Running in-band fraction vs time: PD vs GRPO
-    in_pd = (np.abs(R_pd_pct - target) <= tol)
-    in_gr = (np.abs(R_grpo_pct - target) <= tol)
+    # ----------------------------- showcase plots (paper): PD vs DQN vs GRPO -----------------------------
     w = int(args.run_avg_window)
 
-    fig, ax = plt.subplots(figsize=(8, 5.2))
-    ax.plot(time, running_mean_bool(in_pd, w=w), linewidth=2.2, label=f"PD (w={w})")
-    ax.plot(time, running_mean_bool(in_gr, w=w), linewidth=2.2, label=f"GRPO (w={w})")
-    ax.set_xlabel("Time (Fraction of Run)")
-    ax.set_ylabel("Running in-band fraction")
-    ax.set_ylim(0.0, 1.05)
-    ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True)
-    add_cms_header(fig, run_label=run_label)
-    save_png(fig, str(plots_dir / "running_inband_as_pd_vs_grpo"))
-    plt.close(fig)
+    # ===== AD (AS trigger) =====
+    rate_khz_ad = {
+        "PD":  R_pd_khz,
+        "DQN": R_dqn_khz,
+        "GRPO": R_grpo_khz,
+    }
+    inband_ad = {
+        "PD":  (np.abs(R_pd_pct  - target) <= tol),
+        "DQN": (np.abs(R_dqn_pct - target) <= tol),
+        "GRPO":(np.abs(R_grpo_pct - target) <= tol),
+    }
+    cuts_ad = {
+        "PD":  Cut_pd,
+        "DQN": Cut_dqn,
+        "GRPO": Cut_grpo,
+    }
 
-    # 3) Cut-step magnitude histogram |Δcut|: PD vs GRPO
-    dp = np.diff(Cut_pd) if Cut_pd.size >= 2 else np.array([], dtype=np.float64)
-    dg = np.diff(Cut_grpo) if Cut_grpo.size >= 2 else np.array([], dtype=np.float64)
+    sum_pd_ad  = summarize_compact(R_pd_pct,  TT_pd,  AA_pd,  Cut_pd,  target, tol)
+    sum_dqn_ad = summarize_compact(R_dqn_pct, TT_dqn, AA_dqn, Cut_dqn, target, tol)
+    sum_gr_ad  = summarize_compact(R_grpo_pct,TT_grpo,AA_grpo,Cut_grpo,target, tol)
+    summ_ad = {"PD": sum_pd_ad, "DQN": sum_dqn_ad, "GRPO": sum_gr_ad}
 
-    fig, ax = plt.subplots(figsize=(8, 5.2))
-    ax.hist(np.abs(dp), bins=30, alpha=0.55, label="PD")
-    ax.hist(np.abs(dg), bins=30, alpha=0.55, label="GRPO")
-    ax.set_xlabel(r"$|\Delta AS\_cut|$")
-    ax.set_ylabel("Count")
-    ax.grid(True, linestyle="--", alpha=0.4)
-    ax.legend(loc="best", frameon=True)
-    add_cms_header(fig, run_label=run_label)
-    save_png(fig, str(plots_dir / "cut_step_hist_as_pd_vs_grpo"))
-    plt.close(fig)
+    plot_cdf_abs_err_multi(
+        rate_khz_by_method=rate_khz_ad,
+        target_khz=target_khz, tol_khz=tol_khz,
+        title="AD Trigger", outpath=plots_dir / "cdf_abs_err_ad_pd_dqn_grpo",
+        run_label=run_label,
+    )
+    plot_running_inband_multi(
+        time=time, inband_by_method=inband_ad, w=w,
+        title="AD Trigger", outpath=plots_dir / "running_inband_ad_pd_dqn_grpo",
+        run_label=run_label,
+    )
+    plot_cut_step_hist_multi(
+        cut_by_method=cuts_ad,
+        xlabel=r"$|\Delta AS\_cut|$",
+        title="AD Trigger",
+        outpath=plots_dir / "cut_step_hist_ad_pd_dqn_grpo",
+        run_label=run_label,
+    )
+    plot_inband_eff_bars_multi(
+        summary_by_method=summ_ad,
+        title="AD Trigger",
+        outpath=plots_dir / "inband_eff_bars_ad_pd_dqn_grpo",
+        run_label=run_label,
+    )
 
-    # 4) In-band efficiency bars (PD vs GRPO)
-    sum_pd = summarize_compact(R_pd_pct, TT_pd, AA_pd, Cut_pd, target, tol)
-    sum_gr = summarize_compact(R_grpo_pct, TT_grpo, AA_grpo, Cut_grpo, target, tol)
+    # ===== HT trigger (only if enabled) =====
+    if args.run_ht:
+        rate_khz_ht = {
+            "PD":  R_ht_pd_khz,
+            "DQN": R_ht_dqn_khz,
+            "GRPO": R_ht_grpo_khz,
+        }
+        inband_ht = {
+            "PD":  (np.abs(R_ht_pd_pct  - target) <= tol),
+            "DQN": (np.abs(R_ht_dqn_pct - target) <= tol),
+            "GRPO":(np.abs(R_ht_grpo_pct - target) <= tol),
+        }
+        cuts_ht = {
+            "PD":  Cut_ht_pd,
+            "DQN": Cut_ht_dqn,
+            "GRPO": Cut_ht_grpo,
+        }
 
-    labels = ["ttbar", "HToAATo4B", "80/20"]
-    pd_vals = [sum_pd["TT_inband"], sum_pd["AA_inband"], sum_pd["Mix80_20"]]
-    gr_vals = [sum_gr["TT_inband"], sum_gr["AA_inband"], sum_gr["Mix80_20"]]
+        sum_pd_ht  = summarize_compact(R_ht_pd_pct,  TT_ht_pd,  AA_ht_pd,  Cut_ht_pd,  target, tol)
+        sum_dqn_ht = summarize_compact(R_ht_dqn_pct, TT_ht_dqn, AA_ht_dqn, Cut_ht_dqn, target, tol)
+        sum_gr_ht  = summarize_compact(R_ht_grpo_pct,TT_ht_grpo,AA_ht_grpo,Cut_ht_grpo,target, tol)
+        summ_ht = {"PD": sum_pd_ht, "DQN": sum_dqn_ht, "GRPO": sum_gr_ht}
 
-    x = np.arange(len(labels))
-    bw = 0.35
-
-    fig, ax = plt.subplots(figsize=(8, 5.2))
-    ax.bar(x - bw/2, pd_vals, width=bw, label="PD")
-    ax.bar(x + bw/2, gr_vals, width=bw, label="GRPO")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels)
-    ax.set_ylabel("Mean signal efficiency (in-band)")
-    ax.grid(True, axis="y", linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True)
-    add_cms_header(fig, run_label=run_label)
-    save_png(fig, str(plots_dir / "inband_eff_bars_as_pd_vs_grpo"))
-    plt.close(fig)
+        plot_cdf_abs_err_multi(
+            rate_khz_by_method=rate_khz_ht,
+            target_khz=target_khz, tol_khz=tol_khz,
+            title="HT Trigger", outpath=plots_dir / "cdf_abs_err_ht_pd_dqn_grpo",
+            run_label=run_label,
+        )
+        plot_running_inband_multi(
+            time=time_ht, inband_by_method=inband_ht, w=w,
+            title="HT Trigger", outpath=plots_dir / "running_inband_ht_pd_dqn_grpo",
+            run_label=run_label,
+        )
+        plot_cut_step_hist_multi(
+            cut_by_method=cuts_ht,
+            xlabel=r"$|\Delta Ht\_cut|$",
+            title="HT Trigger",
+            outpath=plots_dir / "cut_step_hist_ht_pd_dqn_grpo",
+            run_label=run_label,
+        )
+        plot_inband_eff_bars_multi(
+            summary_by_method=summ_ht,
+            title="HT Trigger",
+            outpath=plots_dir / "inband_eff_bars_ht_pd_dqn_grpo",
+            run_label=run_label,
+        )
 
     # ----------------------------- compact summary table -----------------------------
     # constant row
@@ -1237,7 +1345,7 @@ def main():
     sum_gr_ad  = summarize_compact(R_grpo_pct,TT_grpo,AA_grpo,Cut_grpo,target, tol)
 
     add_row("AD", "Constant", sum_const_ad)
-    add_row("AD", "PD",       sum_pd_ad)
+    add_row("AD", "PID",       sum_pd_ad)
     add_row("AD", "DQN",      sum_dqn_ad)
     add_row("AD", "GRPO",     sum_gr_ad)
 
@@ -1250,7 +1358,7 @@ def main():
         sum_gr_ht  = summarize_compact(R_ht_grpo_pct,TT_ht_grpo,AA_ht_grpo,Cut_ht_grpo,target, tol)
 
         add_row("HT", "Constant", sum_const_ht)
-        add_row("HT", "PD",       sum_pd_ht)
+        add_row("HT", "PID",       sum_pd_ht)
         add_row("HT", "DQN",      sum_dqn_ht)
         add_row("HT", "GRPO",     sum_gr_ht)
 
