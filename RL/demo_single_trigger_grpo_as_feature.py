@@ -94,7 +94,51 @@ class RollingWindowHT:
             np.fromiter(self._bht, dtype=np.float32),
             np.fromiter(self._bnpv, dtype=np.float32),
         )
+
+
 # ----------------------------- metrics helpers -----------------------------
+
+
+def log_grpo_row(rows, *, trigger, chunk, micro, micro_global, phase,
+                k, a, delta, step,
+                cut_before, cut_next, cut_lo, cut_hi,
+                bg_before, bg_after,
+                tt_after, aa_after,
+                occ_mid,
+                reward_raw=None, reward_best_sample=None, reward_exec=None,
+                executed=0, shielded=0):
+        
+    rows.append({
+        "trigger": str(trigger),          # "AS" or "HT"
+        "chunk": int(chunk),
+        "micro": int(micro),              # per-trigger micro counter (AS uses micro_counter, HT uses ht_micro_counter)
+        "micro_global": int(micro_global),# optional global counter (nice for single x-axis plots)
+        "phase": str(phase),              # "candidate" or "executed"
+
+        "k": int(k),                      # candidate index, or k_best for executed
+        "a": int(a),
+        "delta": float(delta),
+        "step": float(step),              # AS_STEP or HT_STEP
+
+        "cut_before": float(cut_before),
+        "cut_next": float(cut_next),
+        "cut_lo": float(cut_lo),
+        "cut_hi": float(cut_hi),
+
+        "bg_before": float(bg_before),
+        "bg_after": float(bg_after),
+        "tt_after": float(tt_after),
+        "aa_after": float(aa_after),
+
+        "occ_mid": float(occ_mid),
+
+        "reward_raw": (None if reward_raw is None else float(reward_raw)),
+        "reward_best_sample": (None if reward_best_sample is None else float(reward_best_sample)),
+        "reward_exec": (None if reward_exec is None else float(reward_exec)),
+
+        "executed": int(executed),
+        "shielded": int(shielded),
+    })
 def ecdf(x):
     """Creating error cdf"""
     x = np.asarray(x, dtype=np.float64)
@@ -360,13 +404,13 @@ def main():
     ap.add_argument("--seq-len", type=int, default=128)
     ap.add_argument("--inner-stride", type=int, default=10000)
 
-    # GRPO knobs
+    # GRPO kwargs
     ap.add_argument("--group-size", type=int, default=16)
     ap.add_argument("--train-every", type=int, default=50)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--beta-kl", type=float, default=0.02)
     ap.add_argument("--ent-coef", type=float, default=0.01)
-    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--lr", type=float, default=1e-4)
 
     # objective/reward
     ap.add_argument("--target", type=float, default=0.25)   # percent
@@ -493,7 +537,7 @@ def main():
         beta_kl=args.beta_kl,
         ent_coef=args.ent_coef,
         device="cpu",
-        batch_size=256,
+        batch_size=128,
         train_epochs=2,
         ref_update_interval=200,
     )
@@ -594,11 +638,14 @@ def main():
     losses = []
     rewards = []
     # --- GRPO sampled reward logs ---
-    grpo_as_samples = []   # list of dict rows AD
-    grpo_ht_samples = []   # only used if --run-ht Ht
+    # grpo_as_samples = []   # list of dict rows AD
+    # grpo_ht_samples = []   # only used if --run-ht Ht
 
     batch_starts = list(range(start_event, N, chunk_size))
     micro_counter = 0
+    grpo_samples = []   # one table, add column "trigger" = {"AS","HT"}
+
+    micro_global = 0    # optional: single timeline across AS+HT micro-steps
 
     for t, I in enumerate(batch_starts):
         end = min(I + chunk_size, N, len(Bnpv))
@@ -789,21 +836,32 @@ def main():
 
                     cand_rewards_ht[k] = float(r)
 
-                    grpo_ht_samples.append({
-                        "chunk": int(t),
-                        "micro": int(ht_micro_counter),
-                        "k": int(k),
-                        "a": int(a),
-                        "delta": float(dht),
-                        "cut_before": float(Ht_cut_grpo),
-                        "cut_next": float(cut_next),
-                        "bg_before": float(bg_before_ht),
-                        "bg_after": float(bg_after),
-                        "tt_after": float(tt_after),
-                        "aa_after": float(aa_after),
-                        "occ_mid": float(occ_mid_ht),
-                        "reward_raw": float(r),
-                    })
+                    log_grpo_row(
+                        grpo_samples,
+                        trigger="HT",
+                        chunk=t,
+                        micro=ht_micro_counter,
+                        micro_global=micro_global,
+                        phase="candidate",
+                        k=k,
+                        a=a,
+                        delta=dht,
+                        step=HT_STEP,
+                        cut_before=Ht_cut_grpo,
+                        cut_next=cut_next,
+                        cut_lo=ht_lo,
+                        cut_hi=ht_hi,
+                        bg_before=bg_before_ht,
+                        bg_after=bg_after,
+                        tt_after=tt_after,
+                        aa_after=aa_after,
+                        occ_mid=occ_mid_ht,
+                        reward_raw=r,
+                        executed=0,
+                        shielded=0,
+                    )
+                    micro_global += 1
+
 
                 adv_ht = cand_rewards_ht - float(np.mean(cand_rewards_ht))
                 for k in range(G):
@@ -833,24 +891,32 @@ def main():
                 if args.occ_pen > 0:
                     r_exec -= float(args.occ_pen) * occ_mid_ht * (abs(dht_exec) / (MAX_DELTA_HT + 1e-6))
                 
-                grpo_ht_samples.append({
-                        "chunk": int(t),
-                        "micro": int(ht_micro_counter),
-                        "k": int(k_best),
-                        "a": int(a_exec),
-                        "delta": float(dht_exec),
-                        "cut_before": float(Ht_cut_grpo),
-                        "cut_next": float(cut_next_exec),
-                        "bg_before": float(bg_before_ht),
-                        "bg_after": float(bg_after_exec),
-                        "tt_after": float(tt_after_exec),
-                        "aa_after": float(aa_after_exec),
-                        "occ_mid": float(occ_mid_ht),
-                        "reward_raw": float(cand_rewards_ht[k_best]),  # best among sampled (pre-shield)
-                        "reward_exec": float(r_exec),                  # reward for what you actually executed
-                        "executed": 1,
-                        "shielded": int(sd is not None),
-                })
+                log_grpo_row(
+                    grpo_samples,
+                    trigger="HT",
+                    chunk=t,
+                    micro=ht_micro_counter,
+                    micro_global=micro_global,
+                    phase="executed",
+                    k=k_best,
+                    a=a_exec,
+                    delta=dht_exec,
+                    step=HT_STEP,
+                    cut_before=Ht_cut_grpo,
+                    cut_next=cut_next_exec,
+                    cut_lo=ht_lo,
+                    cut_hi=ht_hi,
+                    bg_before=bg_before_ht,
+                    bg_after=bg_after_exec,
+                    tt_after=tt_after_exec,
+                    aa_after=aa_after_exec,
+                    occ_mid=occ_mid_ht,
+                    reward_best_sample=float(cand_rewards_ht[k_best]),  # pre-shield best sampled
+                    reward_exec=r_exec,                                 # reward of executed (post-shield)
+                    executed=1,
+                    shielded=int(sd is not None),
+                )
+                micro_global += 1
 
                 Ht_cut_grpo = cut_next_exec
                 prev_bg_ht = bg_after_exec
@@ -978,28 +1044,39 @@ def main():
                     beta=float(args.beta),
                     prev_bg_rate=bg_before,
                     gamma_stab=0.3,
-            )
+                )
 
                 if args.occ_pen > 0:
                     r -= float(args.occ_pen) * occ_mid * (abs(das) / (MAX_DELTA_AS + 1e-6))
 
                 cand_rewards[k] = float(r)
 
-                grpo_as_samples.append({
-                    "chunk": int(t),
-                    "micro": int(micro_counter),
-                    "k": int(k),
-                    "a": int(a),
-                    "delta": float(das),
-                    "cut_before": float(AS_cut_grpo),
-                    "cut_next": float(cut_next),
-                    "bg_before": float(bg_before),
-                    "bg_after": float(bg_after),
-                    "tt_after": float(tt_after),
-                    "aa_after": float(aa_after),
-                    "occ_mid": float(occ_mid),
-                    "reward_raw": float(r),              # after occ_pen already applied in your code path
-                })
+                log_grpo_row(
+                    grpo_samples,
+                    trigger="AS",
+                    chunk=t,
+                    micro=micro_counter,
+                    micro_global=micro_global,
+                    phase="candidate",
+                    k=k,
+                    a=a,
+                    delta=das,
+                    step=AS_STEP,
+                    cut_before=AS_cut_grpo,
+                    cut_next=cut_next,
+                    cut_lo=as_lo,
+                    cut_hi=as_hi,
+                    bg_before=bg_before,
+                    bg_after=bg_after,
+                    tt_after=tt_after,
+                    aa_after=aa_after,
+                    occ_mid=occ_mid,
+                    reward_raw=r,
+                    executed=0,
+                    shielded=0,
+                )
+                micro_global += 1
+
 
             reward_mean = float(np.mean(cand_rewards))
             reward_std  = float(np.std(cand_rewards, ddof=0))  # population std
@@ -1033,24 +1110,33 @@ def main():
                 r_exec -= float(args.occ_pen) * occ_mid * (abs(das_exec) / (MAX_DELTA_AS + 1e-6))
 
 
-            grpo_as_samples.append({
-                "chunk": int(t),
-                "micro": int(micro_counter),
-                "k": int(k_best),
-                "a": int(a_exec),
-                "delta": float(das_exec),
-                "cut_before": float(AS_cut_grpo),
-                "cut_next": float(cut_next_exec),
-                "bg_before": float(bg_before),
-                "bg_after": float(bg_after_exec),
-                "tt_after": float(Sing_Trigger(sas_tt, cut_next_exec)),
-                "aa_after": float(Sing_Trigger(sas_aa, cut_next_exec)),
-                "occ_mid": float(occ_mid),
-                "reward_best_sample": float(cand_rewards[k_best]),
-                "reward_exec": float(r_exec),
-                "executed": 1,
-                "shielded": int(sd is not None),
-            })
+            log_grpo_row(
+                grpo_samples,
+                trigger="AS",
+                chunk=t,
+                micro=micro_counter,
+                micro_global=micro_global,
+                phase="executed",
+                k=k_best,
+                a=a_exec,
+                delta=das_exec,
+                step=AS_STEP,
+                cut_before=AS_cut_grpo,
+                cut_next=cut_next_exec,
+                cut_lo=as_lo,
+                cut_hi=as_hi,
+                bg_before=bg_before,
+                bg_after=bg_after_exec,
+                tt_after=tt_after_exec,
+                aa_after=aa_after_exec,
+                occ_mid=occ_mid,
+                reward_best_sample=float(cand_rewards[k_best]),
+                reward_exec=r_exec,
+                executed=1,
+                shielded=int(sd is not None),
+            )
+            micro_global += 1
+
 
             # IMPORTANT: update GRPO state
             AS_cut_grpo = cut_next_exec
@@ -1516,6 +1602,7 @@ def main():
     write_compact_tables(rows, out_csv, out_tex, target_pct=target, tol_pct=tol)
 
 
+
     def dump_samples(rows, out_csv: Path):
         if not rows:
             return
@@ -1525,9 +1612,8 @@ def main():
             w.writeheader()
             w.writerows(rows)
 
-    dump_samples(grpo_as_samples, outdir / "grpo_as_sampled_rewards.csv")
-    if args.run_ht:
-        dump_samples(grpo_ht_samples, outdir / "grpo_ht_sampled_rewards.csv")
+    dump_samples(grpo_samples, outdir / "grpo_as_ht_sampled_rewards.csv")
+
 
     print(f"[OK] Wrote: {out_csv}")
     print(f"[OK] Wrote: {out_tex}")
