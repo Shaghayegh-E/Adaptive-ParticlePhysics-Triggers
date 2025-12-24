@@ -593,6 +593,9 @@ def main():
 
     losses = []
     rewards = []
+    # --- GRPO sampled reward logs ---
+    grpo_as_samples = []   # list of dict rows AD
+    grpo_ht_samples = []   # only used if --run-ht Ht
 
     batch_starts = list(range(start_event, N, chunk_size))
     micro_counter = 0
@@ -786,6 +789,22 @@ def main():
 
                     cand_rewards_ht[k] = float(r)
 
+                    grpo_ht_samples.append({
+                        "chunk": int(t),
+                        "micro": int(ht_micro_counter),
+                        "k": int(k),
+                        "a": int(a),
+                        "delta": float(dht),
+                        "cut_before": float(Ht_cut_grpo),
+                        "cut_next": float(cut_next),
+                        "bg_before": float(bg_before_ht),
+                        "bg_after": float(bg_after),
+                        "tt_after": float(tt_after),
+                        "aa_after": float(aa_after),
+                        "occ_mid": float(occ_mid_ht),
+                        "reward_raw": float(r),
+                    })
+
                 adv_ht = cand_rewards_ht - float(np.mean(cand_rewards_ht))
                 for k in range(G):
                     agent_ht.buf.push(obs_ht, int(acts_ht[k]), float(old_logps_ht[k]), float(adv_ht[k]))
@@ -798,10 +817,42 @@ def main():
                 if sd is not None:
                     dht_exec = float(sd)
 
-                cut_next = float(np.clip(Ht_cut_grpo + dht_exec, ht_lo, ht_hi))
-                bg_after_exec = Sing_Trigger(bht_j, cut_next)
+                cut_next_exec = float(np.clip(Ht_cut_grpo + dht_exec, ht_lo, ht_hi))
+                bg_after_exec = Sing_Trigger(bht_j, cut_next_exec)
+                tt_after_exec = Sing_Trigger(sht_tt, cut_next_exec)
+                aa_after_exec = Sing_Trigger(sht_aa, cut_next_exec)
 
-                Ht_cut_grpo = cut_next
+                r_exec = compute_reward(
+                    bg_rate=bg_after_exec, target=target, tol=tol,
+                    sig_rate_1=tt_after_exec, sig_rate_2=aa_after_exec,
+                    delta_applied=dht_exec, max_delta=MAX_DELTA_HT,
+                    alpha=float(args.alpha), beta=float(args.beta),
+                    prev_bg_rate=bg_before_ht, gamma_stab=0.3,
+                )
+
+                if args.occ_pen > 0:
+                    r_exec -= float(args.occ_pen) * occ_mid_ht * (abs(dht_exec) / (MAX_DELTA_HT + 1e-6))
+                
+                grpo_ht_samples.append({
+                        "chunk": int(t),
+                        "micro": int(ht_micro_counter),
+                        "k": int(k_best),
+                        "a": int(a_exec),
+                        "delta": float(dht_exec),
+                        "cut_before": float(Ht_cut_grpo),
+                        "cut_next": float(cut_next_exec),
+                        "bg_before": float(bg_before_ht),
+                        "bg_after": float(bg_after_exec),
+                        "tt_after": float(tt_after_exec),
+                        "aa_after": float(aa_after_exec),
+                        "occ_mid": float(occ_mid_ht),
+                        "reward_raw": float(cand_rewards_ht[k_best]),  # best among sampled (pre-shield)
+                        "reward_exec": float(r_exec),                  # reward for what you actually executed
+                        "executed": 1,
+                        "shielded": int(sd is not None),
+                })
+
+                Ht_cut_grpo = cut_next_exec
                 prev_bg_ht = bg_after_exec
                 last_dht = dht_exec
 
@@ -934,26 +985,79 @@ def main():
 
                 cand_rewards[k] = float(r)
 
-            adv = cand_rewards - float(np.mean(cand_rewards))
+                grpo_as_samples.append({
+                    "chunk": int(t),
+                    "micro": int(micro_counter),
+                    "k": int(k),
+                    "a": int(a),
+                    "delta": float(das),
+                    "cut_before": float(AS_cut_grpo),
+                    "cut_next": float(cut_next),
+                    "bg_before": float(bg_before),
+                    "bg_after": float(bg_after),
+                    "tt_after": float(tt_after),
+                    "aa_after": float(aa_after),
+                    "occ_mid": float(occ_mid),
+                    "reward_raw": float(r),              # after occ_pen already applied in your code path
+                })
+
+            reward_mean = float(np.mean(cand_rewards))
+            reward_std  = float(np.std(cand_rewards, ddof=0))  # population std
+            adv = (cand_rewards - reward_mean) / (reward_std + 1e-8)
+
             for k in range(G):
                 agent.buf.push(obs, int(acts[k]), float(old_logps[k]), float(adv[k]))
 
             k_best = int(np.argmax(cand_rewards))
             a_exec = int(acts[k_best])
+
             das_exec = float(AS_DELTAS[a_exec] * AS_STEP)
 
             sd = shield_delta(bg_before, target, tol, MAX_DELTA_AS)
             if sd is not None:
                 das_exec = float(sd)
+            
+            cut_next_exec = float(np.clip(AS_cut_grpo + das_exec, as_lo, as_hi))
+            bg_after_exec = Sing_Trigger(bas_j, cut_next_exec)
+            tt_after_exec = Sing_Trigger(sas_tt, cut_next_exec)
+            aa_after_exec = Sing_Trigger(sas_aa, cut_next_exec)
 
-            cut_next = float(np.clip(AS_cut_grpo + das_exec, as_lo, as_hi))
-            bg_after_exec = Sing_Trigger(bas_j, cut_next)
+            r_exec = compute_reward(
+                bg_rate=bg_after_exec, target=target, tol=tol,
+                sig_rate_1=tt_after_exec, sig_rate_2=aa_after_exec,
+                delta_applied=das_exec, max_delta=MAX_DELTA_AS,
+                alpha=float(args.alpha), beta=float(args.beta),
+                prev_bg_rate=bg_before, gamma_stab=0.3,
+            )
+            if args.occ_pen > 0:
+                r_exec -= float(args.occ_pen) * occ_mid * (abs(das_exec) / (MAX_DELTA_AS + 1e-6))
 
-            AS_cut_grpo = cut_next
+
+            grpo_as_samples.append({
+                "chunk": int(t),
+                "micro": int(micro_counter),
+                "k": int(k_best),
+                "a": int(a_exec),
+                "delta": float(das_exec),
+                "cut_before": float(AS_cut_grpo),
+                "cut_next": float(cut_next_exec),
+                "bg_before": float(bg_before),
+                "bg_after": float(bg_after_exec),
+                "tt_after": float(Sing_Trigger(sas_tt, cut_next_exec)),
+                "aa_after": float(Sing_Trigger(sas_aa, cut_next_exec)),
+                "occ_mid": float(occ_mid),
+                "reward_best_sample": float(cand_rewards[k_best]),
+                "reward_exec": float(r_exec),
+                "executed": 1,
+                "shielded": int(sd is not None),
+            })
+
+            # IMPORTANT: update GRPO state
+            AS_cut_grpo = cut_next_exec
             prev_bg_as = bg_after_exec
             last_das = das_exec
 
-            micro_rewards.append(float(cand_rewards[k_best]))
+            micro_rewards.append(float(r_exec))
             micro_counter += 1
 
             if micro_counter % int(args.train_every) == 0:
@@ -1410,6 +1514,20 @@ def main():
     out_csv = tables_dir / "single_trigger_compact_summary.csv"
     out_tex = tables_dir / "single_trigger_compact_summary.tex"
     write_compact_tables(rows, out_csv, out_tex, target_pct=target, tol_pct=tol)
+
+
+    def dump_samples(rows, out_csv: Path):
+        if not rows:
+            return
+        keys = sorted({k for r in rows for k in r.keys()})
+        with open(out_csv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=keys)
+            w.writeheader()
+            w.writerows(rows)
+
+    dump_samples(grpo_as_samples, outdir / "grpo_as_sampled_rewards.csv")
+    if args.run_ht:
+        dump_samples(grpo_ht_samples, outdir / "grpo_ht_sampled_rewards.csv")
 
     print(f"[OK] Wrote: {out_csv}")
     print(f"[OK] Wrote: {out_tex}")
