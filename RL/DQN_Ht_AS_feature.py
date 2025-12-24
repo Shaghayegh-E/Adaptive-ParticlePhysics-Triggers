@@ -40,13 +40,15 @@ import csv
 from pathlib import Path
 from controllers import PD_controller1, PD_controller2
 from triggers import Sing_Trigger
-from RL.utils import cummean, rel_to_t0, add_cms_header, plot_rate_with_tolerance, save_png, print_h5_tree, read_any_h5, compute_auroc_windows_separate, compute_operating_point_windows_separate #save_pdf_png,
+from RL.utils import cummean, rel_to_t0, add_cms_header, plot_rate_with_tolerance, save_png, print_h5_tree, read_any_h5, compute_auroc_windows_separate, compute_operating_point_windows_separate, style_diag_axes, style_diag_legend, finalize_diag_fig, set_paper_style  #save_pdf_png,
 from RL.dqn_agent import DQNAgent, make_obs, shield_delta, compute_reward, DQNConfig, SeqDQNAgent, make_event_seq_as, make_event_seq_ht
 
 # ------------------------- Fixing seed for reproducibility -------------------------
 SEED = 20251213
 random.seed(SEED)
 np.random.seed(SEED)
+
+set_paper_style()
 
 def near_occupancy(x, cut, widths):
     x = np.asarray(x, dtype=np.float32)
@@ -663,29 +665,29 @@ def main():
     
     # ------------------------- diagnostic plot styling -------------------------
 
-    DIAG_AX_LABEL_FS = AX_LABEL_FS
-    DIAG_TICK_FS     = TICK_FS
-    DIAG_LEGEND_FS   = LEGEND_FS
-    DIAG_LEGEND_TITLE_FS = LEGEND_TITLE_FS
+    # DIAG_AX_LABEL_FS = AX_LABEL_FS
+    # DIAG_TICK_FS     = TICK_FS
+    # DIAG_LEGEND_FS   = LEGEND_FS
+    # DIAG_LEGEND_TITLE_FS = LEGEND_TITLE_FS
 
-    def style_diag_axes(ax, xlabel, ylabel, ylim=None):
-        ax.set_xlabel(xlabel, fontsize=DIAG_AX_LABEL_FS)
-        ax.set_ylabel(ylabel, fontsize=DIAG_AX_LABEL_FS)
-        ax.tick_params(axis="both", which="major", labelsize=DIAG_TICK_FS)
-        if ylim is not None:
-            ax.set_ylim(*ylim)
-        ax.grid(True, linestyle="--", alpha=0.5)
+    # def style_diag_axes(ax, xlabel, ylabel, ylim=None):
+    #     ax.set_xlabel(xlabel, fontsize=DIAG_AX_LABEL_FS)
+    #     ax.set_ylabel(ylabel, fontsize=DIAG_AX_LABEL_FS)
+    #     ax.tick_params(axis="both", which="major", labelsize=DIAG_TICK_FS)
+    #     if ylim is not None:
+    #         ax.set_ylim(*ylim)
+    #     ax.grid(True, linestyle="--", alpha=0.5)
 
-    def style_diag_legend(ax, title=None, loc="best"):
-        leg = ax.legend(loc=loc, frameon=True, fontsize=DIAG_LEGEND_FS, title=title)
-        if title is not None and leg is not None:
-            leg.get_title().set_fontsize(DIAG_LEGEND_TITLE_FS)
-        return leg
+    # def style_diag_legend(ax, title=None, loc="best"):
+    #     leg = ax.legend(loc=loc, frameon=True, fontsize=DIAG_LEGEND_FS, title=title)
+    #     if title is not None and leg is not None:
+    #         leg.get_title().set_fontsize(DIAG_LEGEND_TITLE_FS)
+    #     return leg
 
-    def finalize_diag_fig(fig, top=0.86):
-        # Reserve space for CMS header so it doesn’t collide with ticks/title
-        fig.tight_layout()
-        fig.subplots_adjust(top=top)
+    # def finalize_diag_fig(fig, top=0.86):
+    #     # Reserve space for CMS header so it doesn’t collide with ticks/title
+    #     fig.tight_layout()
+    #     fig.subplots_adjust(top=top)
 
     time = np.linspace(0, 1, len(R1_ht))
 
@@ -837,16 +839,19 @@ def main():
             label=fr"DQN, ttbar ($\epsilon[t_0]={tt_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
     ax.plot(time, rel_to_t0(aa_c_dqn), color=colors_ht["HToAATo4B"],
             label=fr"DQN, HToAATo4B ($\epsilon[t_0]={aa_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
-    apply_axes_style(
-        ax,
-        xlabel="Time (Fraction of Run)",
-        ylabel="Relative Cumulative Efficiency",
-        ylim=(0.0, 2.5),
-    )
+    # apply_axes_style(
+    #     ax,
+    #     xlabel="Time (Fraction of Run)",
+    #     ylabel="Relative Cumulative Efficiency",
+    #     ylim=(0.0, 2.5),
+    # )
 
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.set_ylim(0.5, 2.5)
-    ax.legend(title="HT Trigger", fontsize=14, frameon=True, loc="best")
+    # ax.legend(title="HT Trigger", fontsize=14, frameon=True, loc="best")
+    style_diag_axes(ax, "Time (Fraction of Run)", "Relative Cumulative Efficiency", ylim=(0.5, 2.5))
+    style_diag_legend(ax, title="HT Trigger")
+    finalize_diag_fig(fig)
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(outdir / "sht_rate_pidData2data_dqn"))
     plt.close(fig)
@@ -865,17 +870,20 @@ def main():
             label=fr"DQN, ttbar ($\epsilon[t_0]={L_tt_ht_dqn[0]:.2f}\%$)", **DQN_STYLE)
     ax.plot(time, rel_to_t0(L_aa_ht_dqn), color=colors_ht["HToAATo4B"], 
             label=fr"DQN, HToAATo4B ($\epsilon[t_0]={L_aa_ht_dqn[0]:.2f}\%$)", **DQN_STYLE)
-    apply_axes_style(
-        ax,
-        xlabel="Time (Fraction of Run)",
-        ylabel="Relative Efficiency",
-        ylim=(0.0, 2.5),
-    )
+    # apply_axes_style(
+    #     ax,
+    #     xlabel="Time (Fraction of Run)",
+    #     ylabel="Relative Efficiency",
+    #     ylim=(0.0, 2.5),
+    # )
 
     ax.grid(True, linestyle="--", alpha=0.6)
 
-    leg = ax.legend(title="HT Trigger", fontsize=LEGEND_FS, frameon=True, loc="best")
-    leg.get_title().set_fontsize(LEGEND_TITLE_FS)
+    # leg = ax.legend(title="HT Trigger", fontsize=LEGEND_FS, frameon=True, loc="best")
+    style_diag_axes(ax, "Time (Fraction of Run)", "Relative Efficiency", ylim=(0.5, 2.5))
+    style_diag_legend(ax, title="HT Trigger")
+    finalize_diag_fig(fig)
+    # leg.get_title().set_fontsize(LEGEND_TITLE_FS)
 
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(outdir / "L_sht_rate_pidData2data_dqn"))
@@ -989,17 +997,20 @@ def main():
     ax.plot(time_as, rel_to_t0(aa_c_dqn), color=colors_ad["HToAATo4B"], 
             label=fr"DQN, HToAATo4B ($\epsilon[t_0]={aa_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
 
-    apply_axes_style(
-        ax,
-        xlabel="Time (Fraction of Run)",
-        ylabel="Relative Cumulative Efficiency",
-        ylim=(0.0, 2.5),
-    )
+    # apply_axes_style(
+    #     ax,
+    #     xlabel="Time (Fraction of Run)",
+    #     ylabel="Relative Cumulative Efficiency",
+    #     ylim=(0.0, 2.5),
+    # )
 
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.set_ylim(0.5, 2.5)
-    leg=ax.legend(title="AD Trigger", fontsize=14, frameon=True, loc="best")
-    leg.get_title().set_fontsize(LEGEND_TITLE_FS)
+    # leg=ax.legend(title="AD Trigger", fontsize=14, frameon=True, loc="best")
+    style_diag_axes(ax, "Time (Fraction of Run)", "Relative Cumulative Efficiency", ylim=(0.5, 2.5))
+    style_diag_legend(ax, title="AD Trigger")
+    finalize_diag_fig(fig)
+    # leg.get_title().set_fontsize(LEGEND_TITLE_FS)
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(outdir / "sas_rate_pidData2data_dqn"))
     plt.close(fig)
@@ -1019,14 +1030,17 @@ def main():
     ax.plot(time_as, rel_to_t0(L_aa_as_dqn), color=colors_ad["HToAATo4B"], linewidth=2.2, linestyle="dashdot",
             label=fr"DQN, HToAATo4B ($\epsilon[t_0]={L_aa_as_dqn[0]:.2f}\%$)")
 
-    apply_axes_style(
-        ax,
-        xlabel="Time (Fraction of Run)",
-        ylabel="Relative Efficiency",
-        ylim=(0.0, 2.5),
-    )
+    # apply_axes_style(
+    #     ax,
+    #     xlabel="Time (Fraction of Run)",
+    #     ylabel="Relative Efficiency",
+    #     ylim=(0.0, 2.5),
+    # )
     ax.grid(True, linestyle="--", alpha=0.6)
-    ax.legend(title="AD Trigger", fontsize=14, frameon=True, loc="best")
+    # ax.legend(title="AD Trigger", fontsize=14, frameon=True, loc="best")
+    style_diag_axes(ax, "Time (Fraction of Run)", "Relative Efficiency", ylim=(0.5, 2.5))
+    style_diag_legend(ax, title="AD Trigger")
+    finalize_diag_fig(fig)
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(outdir / "L_sas_rate_pidData2data_dqn"))
     plt.close(fig)

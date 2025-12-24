@@ -43,7 +43,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from controllers import PD_controller1, PD_controller2
 from triggers import Sing_Trigger
-from RL.utils import add_cms_header, save_png, print_h5_tree, read_any_h5, cummean, rel_to_t0, near_occupancy
+from RL.utils import add_cms_header, save_png, print_h5_tree, read_any_h5, cummean, rel_to_t0, near_occupancy, style_diag_axes, style_diag_legend, finalize_diag_fig, apply_paper_style
 from RL.grpo_agent import GRPOAgent, GRPOConfig #GRPO agent
 from RL.dqn_agent import SeqDQNAgent, DQNConfig  # DQN agent
 from RL.dqn_agent import make_event_seq_as, make_event_seq_ht, shield_delta, compute_reward
@@ -54,6 +54,11 @@ np.random.seed(SEED)
 
 RATE_SCALE_KHZ = 400.0
 
+import mplhep as hep
+hep.style.use("CMS")
+
+from RL.utils import apply_paper_style
+apply_paper_style()
 
 @dataclass
 class RollingWindow:
@@ -245,6 +250,7 @@ def plot_cdf_abs_err_multi(rate_khz_by_method, target_khz, tol_khz, title, outpa
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.legend(loc="best", frameon=True, title=title)
     add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
     save_png(fig, str(outpath))
     plt.close(fig)
 
@@ -263,6 +269,7 @@ def plot_running_inband_multi(time, inband_by_method, w, title, outpath, run_lab
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.legend(loc="best", frameon=True, title=title)
     add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
     save_png(fig, str(outpath))
     plt.close(fig)
 
@@ -300,6 +307,7 @@ def plot_cut_step_hist_multi(cut_by_method, xlabel, title, outpath, run_label, b
     ax.grid(True, linestyle="--", alpha=0.4)
     ax.legend(loc="best", frameon=True, title=title)
     add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
     save_png(fig, str(outpath))
     plt.close(fig)
 
@@ -327,6 +335,7 @@ def plot_inband_eff_bars_multi(summary_by_method, title, outpath, run_label):
     ax.grid(True, axis="y", linestyle="--", alpha=0.5)
     ax.legend(loc="best", frameon=True, title=title)
     add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
     save_png(fig, str(outpath))
     plt.close(fig)
 
@@ -1121,6 +1130,7 @@ def main():
         ax.grid(True, linestyle="--", alpha=0.6)
         ax.legend(loc="best", frameon=True, title=title)
         add_cms_header(fig, run_label=run_label)
+        finalize_diag_fig(fig)
         save_png(fig, str(outpath))
         plt.close(fig)
 
@@ -1143,6 +1153,7 @@ def main():
         ax.grid(True, linestyle="--", alpha=0.6)
         ax.legend(loc="best", frameon=True, title=title)
         add_cms_header(fig, run_label=run_label)
+        finalize_diag_fig(fig)
         save_png(fig, str(outpath))
         plt.close(fig)
 
@@ -1172,6 +1183,7 @@ def main():
         ax.grid(True, linestyle="--", alpha=0.5)
         ax.legend(loc="best", frameon=True, title="HT Trigger")
         add_cms_header(fig, run_label=run_label)
+        finalize_diag_fig(fig)
         save_png(fig, str(outdir / "bht_rate_pidData_grpo"))
         plt.close(fig)
 
@@ -1186,6 +1198,7 @@ def main():
         ax.grid(True, linestyle="--", alpha=0.5)
         ax.legend(loc="best", frameon=True, title="HT Cut")
         add_cms_header(fig, run_label=run_label)
+        finalize_diag_fig(fig)
         save_png(fig, str(outdir / "ht_cut_all_methods"))
         plt.close(fig)
 
@@ -1207,6 +1220,7 @@ def main():
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.legend(loc="best", frameon=True, title="AD Trigger")
     add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
     save_png(fig, str(outdir / "bas_rate_pidData_grpo"))
     plt.close(fig)
 
@@ -1220,6 +1234,7 @@ def main():
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.legend(loc="best", frameon=True, title="AD Cut")
     add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
     save_png(fig, str(outdir / "as_cut_pidData_grpo"))
     plt.close(fig)
 
@@ -1243,6 +1258,7 @@ def main():
         ax.grid(True, linestyle="--", alpha=0.5)
         add_cms_header(fig, run_label=run_label)
         save_png(fig, str(outdir / "grpo_loss_as"))
+        finalize_diag_fig(fig)
         plt.close(fig)
 
     # ----------------------------- showcase plots (paper): PD vs DQN vs GRPO -----------------------------

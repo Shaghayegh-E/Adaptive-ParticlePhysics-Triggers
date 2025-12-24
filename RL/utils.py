@@ -703,3 +703,116 @@ def near_occupancy(x, cut, widths):
         out.append(float(np.mean(np.abs(x - cut) <= float(w))))
     return np.array(out, dtype=np.float32)
 
+
+
+
+# plotting utils
+# --- consistent paper fonts ---
+AX_LABEL_FS = 22
+TICK_FS     = 18
+LEGEND_FS   = 14
+LEGEND_TITLE_FS = 16
+
+DIAG_AX_LABEL_FS = AX_LABEL_FS
+DIAG_TICK_FS     = TICK_FS
+DIAG_LEGEND_FS   = LEGEND_FS
+DIAG_LEGEND_TITLE_FS = LEGEND_TITLE_FS
+
+def style_diag_axes(ax, xlabel, ylabel, ylim=None):
+    ax.set_xlabel(xlabel, fontsize=DIAG_AX_LABEL_FS)
+    ax.set_ylabel(ylabel, fontsize=DIAG_AX_LABEL_FS)
+    ax.tick_params(axis="both", which="major", labelsize=DIAG_TICK_FS)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    ax.grid(True, linestyle="--", alpha=0.5)
+
+def style_diag_legend(ax, title=None, loc="best"):
+    leg = ax.legend(loc=loc, frameon=True, fontsize=DIAG_LEGEND_FS, title=title)
+    if title is not None and leg is not None:
+        leg.get_title().set_fontsize(DIAG_LEGEND_TITLE_FS)
+    return leg
+
+def finalize_diag_fig(fig, top=0.86):
+    # Reserve space for CMS header so it doesn’t collide with ticks/title
+    fig.tight_layout()
+    fig.subplots_adjust(top=top)
+
+import matplotlib as mpl
+
+def apply_paper_style():
+    """Call once, early (after hep.style.use('CMS') if you use mplhep)."""
+    mpl.rcParams.update({
+        # label/tick sizes
+        "axes.labelsize": AX_LABEL_FS,
+        "xtick.labelsize": TICK_FS,
+        "ytick.labelsize": TICK_FS,
+
+        # legend sizes
+        "legend.fontsize": LEGEND_FS,
+        "legend.title_fontsize": LEGEND_TITLE_FS,
+
+        # consistent look
+        "axes.grid": True,
+        "grid.linestyle": "--",
+        "grid.alpha": 0.5,
+        "lines.linewidth": 2.4,
+
+        # saving defaults
+        "savefig.bbox": "tight",
+        "savefig.dpi": 300,
+    })
+
+
+
+
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+
+AX_LABEL_FS = 22
+TICK_FS     = 18
+LEGEND_FS   = 14
+LEGEND_TITLE_FS = 16
+
+DIAG_AX_LABEL_FS = AX_LABEL_FS
+DIAG_TICK_FS     = TICK_FS
+DIAG_LEGEND_FS   = LEGEND_FS
+DIAG_LEGEND_TITLE_FS = LEGEND_TITLE_FS
+
+def set_paper_style():
+    """Call once at program start (after any plt.style.use / hep.style.use)."""
+    mpl.rcParams.update({
+        # text
+        "axes.labelsize": AX_LABEL_FS,
+        "xtick.labelsize": TICK_FS,
+        "ytick.labelsize": TICK_FS,
+        "legend.fontsize": LEGEND_FS,
+        "legend.title_fontsize": LEGEND_TITLE_FS,
+
+        # lines
+        "lines.linewidth": 2.4,
+        "lines.markersize": 4,
+
+        # layout/save
+        "figure.dpi": 120,
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.02,
+    })
+
+def style_diag_axes(ax, xlabel, ylabel, ylim=None):
+    ax.set_xlabel(xlabel, fontsize=DIAG_AX_LABEL_FS)
+    ax.set_ylabel(ylabel, fontsize=DIAG_AX_LABEL_FS)
+    ax.tick_params(axis="both", which="major", labelsize=DIAG_TICK_FS)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    ax.grid(True, linestyle="--", alpha=0.5)
+
+def style_diag_legend(ax, title=None, loc="best"):
+    leg = ax.legend(loc=loc, frameon=True, fontsize=DIAG_LEGEND_FS, title=title)
+    if title is not None and leg is not None:
+        leg.get_title().set_fontsize(DIAG_LEGEND_TITLE_FS)
+    return leg
+
+def finalize_diag_fig(fig, top=0.86):
+    fig.tight_layout()
+    fig.subplots_adjust(top=top)
