@@ -97,6 +97,112 @@ class RollingWindowHT:
 
 
 # ----------------------------- metrics helpers -----------------------------
+def _group_advantages_from_grpo_samples(grpo_samples, *, trigger="AS", baseline="mean", eps=1e-8):
+    """
+    Reconstruct GRPO advantages from logged candidate rewards.
+
+    Returns:
+      adv_raw_all:   list of (r - baseline)
+      adv_norm_all:  list of (r - baseline) / std
+      adv_raw_exec:  list of executed (r_exec - baseline_of_candidates)
+      adv_norm_exec: list of executed (r_exec - baseline) / std
+      frac_vanish:   fraction of groups with std ~ 0 (vanishing-adv groups)
+    """
+    # Filter rows for this trigger
+    rows = [r for r in grpo_samples if r.get("trigger") == trigger]
+
+    # Group candidate rewards by micro-step
+    cand_by_micro = {}
+    exec_by_micro = {}  # store executed row (reward_exec)
+    for r in rows:
+        micro = int(r["micro"])
+        if r["phase"] == "candidate":
+            rr = r.get("reward_raw", None)
+            if rr is None:
+                continue
+            cand_by_micro.setdefault(micro, []).append(float(rr))
+        elif r["phase"] == "executed":
+            # executed reward is stored in reward_exec
+            re = r.get("reward_exec", None)
+            if re is None:
+                continue
+            exec_by_micro[micro] = float(re)
+
+    adv_raw_all, adv_norm_all = [], []
+    adv_raw_exec, adv_norm_exec = [], []
+    vanish_groups = 0
+    total_groups = 0
+
+    for micro, rs in cand_by_micro.items():
+        rs = np.asarray(rs, dtype=np.float64)
+        if rs.size == 0:
+            continue
+
+        if baseline == "median":
+            b = float(np.median(rs))
+        else:
+            b = float(np.mean(rs))
+
+        s = float(np.std(rs))
+        total_groups += 1
+        if s < 1e-12:
+            vanish_groups += 1
+            s = 0.0
+
+        # Candidate advantages
+        adv = rs - b
+        adv_raw_all.extend(adv.tolist())
+        if s > 0:
+            adv_norm_all.extend((adv / (s + eps)).tolist())
+        else:
+            adv_norm_all.extend(np.zeros_like(adv).tolist())
+
+        # Executed advantage (compare executed reward to candidate baseline)
+        if micro in exec_by_micro:
+            re = float(exec_by_micro[micro])
+            ae = re - b
+            adv_raw_exec.append(ae)
+            adv_norm_exec.append(ae / (s + eps) if s > 0 else 0.0)
+
+    frac_vanish = (vanish_groups / max(1, total_groups))
+    return adv_raw_all, adv_norm_all, adv_raw_exec, adv_norm_exec, frac_vanish
+
+
+def _plot_adv_hist_and_ecdf(values, *, title, xlabel, outpath_prefix, run_label):
+    """
+    Saves:
+      - {outpath_prefix}_hist.png
+      - {outpath_prefix}_ecdf.png
+    """
+    x = np.asarray(values, dtype=np.float64)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return
+
+    # Histogram
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    ax.hist(x, bins=60, density=True, alpha=0.75)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Density")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.set_title(title)
+    add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
+    save_png(fig, str(outpath_prefix) + "_hist")
+    plt.close(fig)
+
+    # ECDF
+    xs, ys = ecdf(x)
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    ax.plot(xs, ys, linewidth=2.2)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("CDF")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.set_title(title)
+    add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
+    save_png(fig, str(outpath_prefix) + "_ecdf")
+    plt.close(fig)
 
 
 def log_grpo_row(rows, *, trigger, chunk, micro, micro_global, phase,
@@ -1661,6 +1767,80 @@ def main():
     out_csv = tables_dir / "single_trigger_compact_summary.csv"
     out_tex = tables_dir / "single_trigger_compact_summary.tex"
     write_paper_table(rows, out_csv, out_tex, target_pct=target, tol_pct=tol)
+
+    
+    
+    # ----------------------------- Advantage distribution plots -----------------------------
+    # Inspired by: https://arxiv.org/pdf/2504.08837 VL rethinker
+    # Note: paper-style normalized advantages use (r - mean)/std. :contentReference[oaicite:1]{index=1}
+
+    # AS (AD trigger)
+    adv_raw_as, adv_norm_as, adv_raw_exec_as, adv_norm_exec_as, frac_vanish_as = \
+        _group_advantages_from_grpo_samples(grpo_samples, trigger="AS", baseline="mean")
+
+    _plot_adv_hist_and_ecdf(
+        adv_raw_as,
+        title=f"GRPO Candidate Advantage (AS)  | vanish={frac_vanish_as:.2%}",
+        xlabel=r"$A = r - \mathrm{mean}(r)$",
+        outpath_prefix=plots_dir / "adv_as_candidate_raw",
+        run_label=run_label,
+    )
+    _plot_adv_hist_and_ecdf(
+        adv_norm_as,
+        title=f"GRPO Candidate Advantage Norm (AS)  | vanish={frac_vanish_as:.2%}",
+        xlabel=r"$\hat A = (r-\mathrm{mean}(r))/\mathrm{std}(r)$",
+        outpath_prefix=plots_dir / "adv_as_candidate_norm",
+        run_label=run_label,
+    )
+    _plot_adv_hist_and_ecdf(
+        adv_raw_exec_as,
+        title="GRPO Executed Advantage (AS) (post-shield)",
+        xlabel=r"$A_{\mathrm{exec}} = r_{\mathrm{exec}} - \mathrm{mean}(r_{\mathrm{cand}})$",
+        outpath_prefix=plots_dir / "adv_as_executed_raw",
+        run_label=run_label,
+    )
+    _plot_adv_hist_and_ecdf(
+        adv_norm_exec_as,
+        title="GRPO Executed Advantage Norm (AS) (post-shield)",
+        xlabel=r"$\hat A_{\mathrm{exec}}$",
+        outpath_prefix=plots_dir / "adv_as_executed_norm",
+        run_label=run_label,
+    )
+
+    # HT (optional)
+    if args.run_ht:
+        adv_raw_ht, adv_norm_ht, adv_raw_exec_ht, adv_norm_exec_ht, frac_vanish_ht = \
+            _group_advantages_from_grpo_samples(grpo_samples, trigger="HT", baseline="mean")
+
+        _plot_adv_hist_and_ecdf(
+            adv_raw_ht,
+            title=f"GRPO Candidate Advantage (HT)  | vanish={frac_vanish_ht:.2%}",
+            xlabel=r"$A = r - \mathrm{mean}(r)$",
+            outpath_prefix=plots_dir / "adv_ht_candidate_raw",
+            run_label=run_label,
+        )
+        _plot_adv_hist_and_ecdf(
+            adv_norm_ht,
+            title=f"GRPO Candidate Advantage Norm (HT)  | vanish={frac_vanish_ht:.2%}",
+            xlabel=r"$\hat A = (r-\mathrm{mean}(r))/\mathrm{std}(r)$",
+            outpath_prefix=plots_dir / "adv_ht_candidate_norm",
+            run_label=run_label,
+        )
+        _plot_adv_hist_and_ecdf(
+            adv_raw_exec_ht,
+            title="GRPO Executed Advantage (HT) (post-shield)",
+            xlabel=r"$A_{\mathrm{exec}}$",
+            outpath_prefix=plots_dir / "adv_ht_executed_raw",
+            run_label=run_label,
+        )
+        _plot_adv_hist_and_ecdf(
+            adv_norm_exec_ht,
+            title="GRPO Executed Advantage Norm (HT) (post-shield)",
+            xlabel=r"$\hat A_{\mathrm{exec}}$",
+            outpath_prefix=plots_dir / "adv_ht_executed_norm",
+            run_label=run_label,
+        )
+
 
     print(f"[OK] Wrote: {out_csv}")
     print(f"[OK] Wrote: {out_tex}")
