@@ -93,7 +93,7 @@ class RollingWindow:
 
 def adt_reward_paper_style(bg_scores, sig1_scores, sig2_scores, cut, alpha=0.7, beta=0.3):
     """
-    Paper-style reward from ADT (Eq.(8)): r = α*(TP - FP - FN) + β*TN.
+    Original reward from ADT (Eq.(8)): r = α*(TP - FP - FN) + β*TN.
     Here we treat:
       - background events as "normal" (negative class)
       - signal events as "abnormal" (positive class)
@@ -253,7 +253,7 @@ def main():
                     help="ADT: number of gradient updates done ONLY at end of chunk (episode).")
 
     # ADT action-hold
-    ap.add_argument("--adt-l", type=int, default=5,
+    ap.add_argument("--adt-l", type=int, default=10,
                     help="ADT: update action every l micro-steps; otherwise hold a_t=a_{t-1}.")
 
     # action sets
@@ -262,7 +262,7 @@ def main():
     ap.add_argument("--as-step", type=float, default=0.5)
 
     # reward setup
-    ap.add_argument("--reward-mode", default="lhc", choices=["lhc", "paper"],
+    ap.add_argument("--reward-mode", default="paper", choices=["lhc", "paper"],
                     help="lhc: use compute_reward; paper: use ADT paper-style TP/TN/FP/FN reward.")
     ap.add_argument("--alpha", type=float, default=0.4,
                     help="LHC reward: signal bonus weight. Paper reward: α in Eq.(8).")
@@ -851,7 +851,8 @@ def main():
         tol_lower=lower_tol_khz,
         const_style=dict(color="tab:blue", **CONST_STYLE),
         pd_style=dict(color="mediumblue", **PD_STYLE),
-        dqn_style=dict(color="tab:purple", **ADT_STYLE),  # reuse arg name in util
+        dqn_style=dict(color="tab:purple", **ADT_STYLE),  # reuse arg name in util,
+        dqn_label="ADT",
         add_cms_header=add_cms_header,
         save_pdf_png=save_png,
     )
@@ -867,6 +868,7 @@ def main():
         const_style=dict(color="tab:blue", **CONST_STYLE),
         pd_style=dict(color="mediumblue", **PD_STYLE),
         dqn_style=dict(color="tab:purple", **ADT_STYLE),
+        dqn_label="ADT",
         add_cms_header=add_cms_header,
         save_pdf_png=save_png,
     )
