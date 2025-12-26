@@ -269,6 +269,12 @@ def main():
     L_tt_as_const, L_tt_as_pd, L_tt_as_dqn = [], [], []
     L_aa_as_const, L_aa_as_pd, L_aa_as_dqn = [], [], []
 
+    # --- Counterfactual (CF) action landscape logs (per chunk) ---
+    cf_r_ht = []          # list of shape (n_actions_ht,)
+    cf_r_as = []          # list of shape (n_actions_as,)
+    dqn_act_ht_chunk = [] # last micro-step action index for HT within each chunk
+    dqn_act_as_chunk = [] # last micro-step action index for AS within each chunk
+
     # ------------------------- batching loop -------------------------
     batch_starts = list(range(start_event, N, chunk_size))
 
@@ -358,6 +364,7 @@ def main():
             )
 
             act_ht = agent_ht.act(obs_ht, eps=eps)
+            last_act_ht_in_chunk = act_ht
             dht = float(HT_DELTAS[act_ht])
 
             # shield based on micro-step bg
@@ -432,6 +439,7 @@ def main():
             )
 
             act_as = agent_as.act(obs_as, eps=eps)
+            last_act_as_in_chunk = act_as
             das = float(AS_DELTAS[act_as] * AS_STEP)
 
             sd = shield_delta(bg_before_as, target, tol, MAX_DELTA_AS)
@@ -555,7 +563,67 @@ def main():
         L_tt_as_const.append(tt_const_as); L_tt_as_pd.append(tt_pd_as); L_tt_as_dqn.append(tt_dqn_as)
         L_aa_as_const.append(aa_const_as); L_aa_as_pd.append(aa_pd_as); L_aa_as_dqn.append(aa_dqn_as)
 
+        # =========================================================
+        # Counterfactual reward landscape (per chunk)
+        # Evaluate r(delta) for all actions on the SAME chunk
+        # =========================================================
 
+        # --- HT counterfactuals ---
+        bg_before_ht_cf = Sing_Trigger(bht, Ht_cut_dqn)  # percent units
+        cf_ht = np.zeros(len(HT_DELTAS), dtype=np.float32)
+
+        for a, d in enumerate(HT_DELTAS):
+            cut_next = float(np.clip(Ht_cut_dqn + float(d), ht_lo, ht_hi))
+            bg_after = Sing_Trigger(bht, cut_next)
+            tt_after = Sing_Trigger(sht_tt_j, cut_next)
+            aa_after = Sing_Trigger(sht_aa_j, cut_next)
+
+            cf_ht[a] = compute_reward(
+                bg_rate=bg_after,
+                target=target,
+                tol=tol,
+                sig_rate_1=tt_after,
+                sig_rate_2=aa_after,
+                delta_applied=float(d),
+                max_delta=MAX_DELTA_HT,
+                alpha=alpha,
+                beta=beta,
+                prev_bg_rate=bg_before_ht_cf,   # stability term is meaningful here
+                gamma_stab=0.3,
+            )
+
+        cf_r_ht.append(cf_ht)
+        dqn_act_ht_chunk.append(-1 if last_act_ht_in_chunk is None else int(last_act_ht_in_chunk))
+
+        # --- AS counterfactuals ---
+        bg_before_as_cf = Sing_Trigger(bas, AS_cut_dqn)
+        cf_as = np.zeros(len(AS_DELTAS), dtype=np.float32)
+
+        for a, dm in enumerate(AS_DELTAS):
+            d = float(dm) * AS_STEP
+            cut_next = float(np.clip(AS_cut_dqn + d, as_lo, as_hi))
+            bg_after = Sing_Trigger(bas, cut_next)
+            tt_after = Sing_Trigger(sas_tt_j, cut_next)
+            aa_after = Sing_Trigger(sas_aa_j, cut_next)
+
+            cf_as[a] = compute_reward(
+                bg_rate=bg_after,
+                target=target,
+                tol=tol,
+                sig_rate_1=tt_after,
+                sig_rate_2=aa_after,
+                delta_applied=d,
+                max_delta=MAX_DELTA_AS,
+                alpha=alpha,
+                beta=beta,
+                prev_bg_rate=bg_before_as_cf,
+                gamma_stab=0.3,
+            )
+
+        cf_r_as.append(cf_as)
+        dqn_act_as_chunk.append(-1 if last_act_as_in_chunk is None else int(last_act_as_in_chunk))
+
+        
         # ===========================
         # Per-chunk feature diagnostics
         # ===========================
@@ -713,6 +781,84 @@ def main():
     plots_dir.mkdir(parents=True, exist_ok=True)
     tables_dir.mkdir(parents=True, exist_ok=True)
 
+    cf_r_ht = np.asarray(cf_r_ht, dtype=np.float32)  # (T, Aht)
+    cf_r_as = np.asarray(cf_r_as, dtype=np.float32)  # (T, Aas)
+    dqn_act_ht_chunk = np.asarray(dqn_act_ht_chunk, dtype=np.int32)
+    dqn_act_as_chunk = np.asarray(dqn_act_as_chunk, dtype=np.int32)
+
+    def plot_cf_landscape(cf_r, deltas, act_idx, outpath, title, xlabel):
+        # show a few representative times: early/mid/late
+        T = cf_r.shape[0]
+        picks = [0, T//2, T-1] if T >= 3 else list(range(T))
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for t0 in picks:
+            ax.plot(deltas, cf_r[t0], linewidth=2.0, label=f"chunk {t0}")
+            a = act_idx[t0]
+            if 0 <= a < len(deltas):
+                ax.scatter([deltas[a]], [cf_r[t0, a]], s=60)
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Counterfactual reward  r(Δθ)")
+        ax.set_title(title)
+        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.legend(loc="best", frameon=True)
+        add_cms_header(fig, run_label=run_label)
+        save_png(fig, str(outpath))
+        plt.close(fig)
+
+    def plot_regret_gap(cf_r, act_idx, outpath, title):
+        # regret gap = best achievable CF reward - reward of chosen action
+        best = np.max(cf_r, axis=1)
+        chosen = np.full(cf_r.shape[0], np.nan, dtype=np.float32)
+        for t in range(cf_r.shape[0]):
+            a = act_idx[t]
+            if 0 <= a < cf_r.shape[1]:
+                chosen[t] = cf_r[t, a]
+        gap = best - chosen
+
+        tt = np.linspace(0, 1, len(gap))
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(tt, gap, linewidth=2.0)
+        ax.set_xlabel("Time (Fraction of Run)")
+        ax.set_ylabel("Regret gap")
+        ax.set_title(title)
+        ax.grid(True, linestyle="--", alpha=0.5)
+        add_cms_header(fig, run_label=run_label)
+        save_png(fig, str(outpath))
+        plt.close(fig)
+
+    # HT plots
+    plot_cf_landscape(
+        cf_r=cf_r_ht,
+        deltas=HT_DELTAS,
+        act_idx=dqn_act_ht_chunk,
+        outpath=plots_dir / "cf_reward_landscape_ht",
+        title="HT: counterfactual reward landscape r(ΔHt_cut) on the same chunk",
+        xlabel=r"$\Delta Ht\_cut$ [GeV]",
+    )
+    plot_regret_gap(
+        cf_r=cf_r_ht,
+        act_idx=dqn_act_ht_chunk,
+        outpath=plots_dir / "regret_gap_ht",
+        title="HT: regret gap = max_a r(a) - r(a_DQN) (per chunk)",
+    )
+
+    # AS plots
+    plot_cf_landscape(
+        cf_r=cf_r_as,
+        deltas=AS_DELTAS * AS_STEP,  # actual delta in cut units
+        act_idx=dqn_act_as_chunk,
+        outpath=plots_dir / "cf_reward_landscape_as",
+        title="AS: counterfactual reward landscape r(ΔAS_cut) on the same chunk",
+        xlabel=r"$\Delta AS\_cut$",
+    )
+    plot_regret_gap(
+        cf_r=cf_r_as,
+        act_idx=dqn_act_as_chunk,
+        outpath=plots_dir / "regret_gap_as",
+        title="AS: regret gap = max_a r(a) - r(a_DQN) (per chunk)",
+    )
+
     # -------------------------
     # Chunk-level diagnostics plots
     # -------------------------
@@ -839,12 +985,7 @@ def main():
             label=fr"DQN, ttbar ($\epsilon[t_0]={tt_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
     ax.plot(time, rel_to_t0(aa_c_dqn), color=colors_ht["HToAATo4B"],
             label=fr"DQN, HToAATo4B ($\epsilon[t_0]={aa_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
-    # apply_axes_style(
-    #     ax,
-    #     xlabel="Time (Fraction of Run)",
-    #     ylabel="Relative Cumulative Efficiency",
-    #     ylim=(0.0, 2.5),
-    # )
+
 
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.set_ylim(0.5, 2.5)
@@ -870,12 +1011,7 @@ def main():
             label=fr"DQN, ttbar ($\epsilon[t_0]={L_tt_ht_dqn[0]:.2f}\%$)", **DQN_STYLE)
     ax.plot(time, rel_to_t0(L_aa_ht_dqn), color=colors_ht["HToAATo4B"], 
             label=fr"DQN, HToAATo4B ($\epsilon[t_0]={L_aa_ht_dqn[0]:.2f}\%$)", **DQN_STYLE)
-    # apply_axes_style(
-    #     ax,
-    #     xlabel="Time (Fraction of Run)",
-    #     ylabel="Relative Efficiency",
-    #     ylim=(0.0, 2.5),
-    # )
+
 
     ax.grid(True, linestyle="--", alpha=0.6)
 
@@ -996,13 +1132,6 @@ def main():
             label=fr"DQN, ttbar ($\epsilon[t_0]={tt_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
     ax.plot(time_as, rel_to_t0(aa_c_dqn), color=colors_ad["HToAATo4B"], 
             label=fr"DQN, HToAATo4B ($\epsilon[t_0]={aa_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
-
-    # apply_axes_style(
-    #     ax,
-    #     xlabel="Time (Fraction of Run)",
-    #     ylabel="Relative Cumulative Efficiency",
-    #     ylim=(0.0, 2.5),
-    # )
 
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.set_ylim(0.5, 2.5)

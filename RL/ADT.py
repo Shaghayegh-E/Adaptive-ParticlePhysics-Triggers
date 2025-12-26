@@ -66,6 +66,7 @@ np.random.seed(SEED)
 set_paper_style()
 
 
+
 @dataclass
 class RollingWindow:
     """Sliding window of recent background events for feature construction."""
@@ -134,12 +135,105 @@ def moving_avg_nan(x, w=5):
     den = np.convolve(m,  k, mode="same")
     return num / np.maximum(den, 1e-8)
 
+def _truncate_to_min_len(*arrs):
+    """Truncate all 1D arrays/lists to the same minimum length."""
+    L = min(len(a) for a in arrs if a is not None)
+    out = []
+    for a in arrs:
+        if a is None:
+            out.append(None)
+        else:
+            out.append(np.asarray(a)[:L])
+    return out
+
+def summarize_table_metrics(r_pct, s_tt, s_aa, cut_hist, target_pct, tol_pct):
+    """
+    Metrics used in your LaTeX table, evaluated in percent units.
+    Columns:
+      MAE, P95|e|, InBand, UpViol, TV, ttbar(inband), h->4b(inband)
+    """
+    r_pct = np.asarray(r_pct, dtype=np.float64)
+    s_tt  = np.asarray(s_tt,  dtype=np.float64)
+    s_aa  = np.asarray(s_aa,  dtype=np.float64)
+    cut   = np.asarray(cut_hist, dtype=np.float64)
+
+    # Align lengths safely (important if something early-breaks)
+    r_pct, s_tt, s_aa, cut = _truncate_to_min_len(r_pct, s_tt, s_aa, cut)
+
+    err = r_pct - float(target_pct)
+    abs_err = np.abs(err)
+    inband = abs_err <= float(tol_pct)
+
+    out = {}
+    out["MAE"]      = float(np.mean(abs_err)) if abs_err.size else np.nan
+    out["P95"]      = float(np.percentile(abs_err, 95)) if abs_err.size else np.nan
+    out["InBand"]   = float(np.mean(inband)) if inband.size else np.nan
+    out["UpViol"]   = float(np.mean(r_pct > (float(target_pct) + float(tol_pct)))) if r_pct.size else np.nan
+
+    dc = np.diff(cut) if cut.size >= 2 else np.array([], dtype=np.float64)
+    out["TV"] = float(np.sum(np.abs(dc))) if dc.size else 0.0
+
+    def safe_mean(x, m):
+        return float(np.mean(x[m])) if np.any(m) else np.nan
+
+    out["ttbar"] = safe_mean(s_tt, inband)
+    out["h4b"]   = safe_mean(s_aa, inband)
+    return out
+
+def write_adt_table(rows, tex_path, caption, label):
+    """
+    Write a LaTeX table matching your screenshot style (two blocks: HT trigger, AD trigger).
+    rows: list of dicts with keys:
+      Trigger, Method, MAE, P95, InBand, UpViol, TV, ttbar, h4b
+    """
+    def fmt(x):
+        if x is None:
+            return "xx"
+        if isinstance(x, (float, np.floating)):
+            if not np.isfinite(x):
+                return "xx"
+            # table-like compact formatting
+            return f"{x:.3g}"
+        return str(x)
+
+    lines = []
+    lines.append(r"\begin{table}[t]")
+    lines.append(r"\centering")
+    lines.append(r"\small")
+    lines.append(r"\setlength{\tabcolsep}{5pt}")
+    lines.append(r"\renewcommand{\arraystretch}{1.08}")
+    lines.append(r"\begin{tabular}{llrrrrrrr}")
+    lines.append(r"\hline")
+    lines.append(r"Trigger & Method & MAE$\downarrow$ & P95$|e|\,\downarrow$ & InBand$\uparrow$ & UpViol$\downarrow$ & TV$\downarrow$ & $\bar{t}\bar{t}\uparrow$ & $h\to4b\uparrow$ \\")
+    lines.append(r"\hline")
+
+    def emit_block(block_title, trig_key):
+        lines.append(rf"\multicolumn{{9}}{{l}}{{\textbf{{{block_title}}}}} \\")
+        for r in rows:
+            if r["Trigger"] != trig_key:
+                continue
+            lines.append(
+                f"{fmt(r['Trigger'])} & {fmt(r['Method'])} & "
+                f"{fmt(r['MAE'])} & {fmt(r['P95'])} & {fmt(r['InBand'])} & {fmt(r['UpViol'])} & "
+                f"{fmt(r['TV'])} & {fmt(r['ttbar'])} & {fmt(r['h4b'])} \\\\"
+            )
+        lines.append(r"\hline")
+
+    emit_block("HT trigger", "HT")
+    emit_block("AD trigger", "AD")
+
+    lines.append(r"\end{tabular}")
+    lines.append(rf"\caption{{{caption}}}")
+    lines.append(rf"\label{{{label}}}")
+    lines.append(r"\end{table}")
+
+    Path(tex_path).write_text("\n".join(lines) + "\n")
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", default="Data/Trigger_food_MC.h5",
                     choices=["Data/Trigger_food_MC.h5", "Data/Matched_data_2016_dim2.h5"])
-    ap.add_argument("--outdir", default="RL_outputs/demo_sing_adt_feature", help="output dir")
+    ap.add_argument("--outdir", default="outputs/demo_sing_adt_feature", help="output dir")
     ap.add_argument("--control", default="MC", choices=["MC", "RealData"],
                     help="Control type: MC or RealData")
     ap.add_argument("--score-dim-hint", type=int, default=2,
@@ -587,6 +681,98 @@ def main():
                   f"ht_cut pd={Ht_cut_pd:.1f} adt={Ht_cut_adt:.1f} loss={lh} | "
                   f"AS bg% const={bg_const_as:.3f} pd={bg_pd_as:.3f} adt={bg_adt_as:.3f} | "
                   f"as_cut pd={AS_cut_pd:.4f} adt={AS_cut_adt:.4f} loss={la}")
+
+
+    # =========================================================
+    # Summary metrics + LaTeX/CSV table output (percent units)
+    # =========================================================
+    tables_dir = outdir / "tables"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+
+    # rates are in percent units here (since Sing_Trigger returns percent)
+    R_const_ht_pct = np.asarray(R_const_ht, dtype=np.float64)
+    R_pd_ht_pct    = np.asarray(R_pd_ht,    dtype=np.float64)
+    R_adt_ht_pct   = np.asarray(R_adt_ht,   dtype=np.float64)
+
+    R_const_ad_pct = np.asarray(R_const_as, dtype=np.float64)  # AD == AS
+    R_pd_ad_pct    = np.asarray(R_pd_as,    dtype=np.float64)
+    R_adt_ad_pct   = np.asarray(R_adt_as,   dtype=np.float64)
+
+    # efficiency logs (also in percent)
+    L_tt_ht_const_np = np.asarray(L_tt_ht_const, dtype=np.float64)
+    L_tt_ht_pd_np    = np.asarray(L_tt_ht_pd,    dtype=np.float64)
+    L_tt_ht_adt_np   = np.asarray(L_tt_ht_adt,   dtype=np.float64)
+    L_aa_ht_const_np = np.asarray(L_aa_ht_const, dtype=np.float64)
+    L_aa_ht_pd_np    = np.asarray(L_aa_ht_pd,    dtype=np.float64)
+    L_aa_ht_adt_np   = np.asarray(L_aa_ht_adt,   dtype=np.float64)
+
+    L_tt_ad_const_np = np.asarray(L_tt_as_const, dtype=np.float64)
+    L_tt_ad_pd_np    = np.asarray(L_tt_as_pd,    dtype=np.float64)
+    L_tt_ad_adt_np   = np.asarray(L_tt_as_adt,   dtype=np.float64)
+    L_aa_ad_const_np = np.asarray(L_aa_as_const, dtype=np.float64)
+    L_aa_ad_pd_np    = np.asarray(L_aa_as_pd,    dtype=np.float64)
+    L_aa_ad_adt_np   = np.asarray(L_aa_as_adt,   dtype=np.float64)
+
+    # cut histories
+    Ht_pd_np  = np.asarray(Ht_pd_hist,  dtype=np.float64)
+    Ht_adt_np = np.asarray(Ht_adt_hist, dtype=np.float64)
+    As_pd_np  = np.asarray(As_pd_hist,  dtype=np.float64)
+    As_adt_np = np.asarray(As_adt_hist, dtype=np.float64)
+
+    # constant cut histories (TV=0)
+    Ht_const_np = np.full_like(Ht_pd_np, fixed_Ht_cut, dtype=np.float64)
+    As_const_np = np.full_like(As_pd_np, fixed_AS_cut, dtype=np.float64)
+
+    target_pct = float(target)
+    tol_pct    = float(tol)
+
+    rows = []
+
+    def add_row(trigger, method, metrics):
+        r = {"Trigger": trigger, "Method": method}
+        r.update(metrics)
+        rows.append(r)
+
+    # HT block
+    add_row("HT", "Constant",
+            summarize_table_metrics(R_const_ht_pct, L_tt_ht_const_np, L_aa_ht_const_np, Ht_const_np, target_pct, tol_pct))
+    add_row("HT", "PD",
+            summarize_table_metrics(R_pd_ht_pct,    L_tt_ht_pd_np,    L_aa_ht_pd_np,    Ht_pd_np,    target_pct, tol_pct))
+    add_row("HT", "ADT Yang et al. (2024)",
+            summarize_table_metrics(R_adt_ht_pct,   L_tt_ht_adt_np,   L_aa_ht_adt_np,   Ht_adt_np,   target_pct, tol_pct))
+
+    # AD (AS) block
+    add_row("AD", "Constant",
+            summarize_table_metrics(R_const_ad_pct, L_tt_ad_const_np, L_aa_ad_const_np, As_const_np, target_pct, tol_pct))
+    add_row("AD", "PD",
+            summarize_table_metrics(R_pd_ad_pct,    L_tt_ad_pd_np,    L_aa_ad_pd_np,    As_pd_np,    target_pct, tol_pct))
+    add_row("AD", "ADT Yang et al. (2024)",
+            summarize_table_metrics(R_adt_ad_pct,   L_tt_ad_adt_np,   L_aa_ad_adt_np,   As_adt_np,   target_pct, tol_pct))
+
+    # CSV
+    import csv
+    csv_path = tables_dir / "adt_summary.csv"
+    with open(csv_path, "w", newline="") as f:
+        fieldnames = ["Trigger","Method","MAE","P95","InBand","UpViol","TV","ttbar","h4b"]
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in fieldnames})
+
+    # LaTeX
+    tex_path = tables_dir / "adt_summary.tex"
+    caption = (
+        f"ADT baseline summary. Rates evaluated in percent units with target $r^*={target_pct:.3g}\\%$ "
+        f"and tolerance $\\pm{tol_pct:.3g}\\%$. "
+        "MAE and P95$|e|$ summarize typical and tail absolute rate errors; "
+        "InBand and UpViol are fractions of chunks within band and above the upper tolerance. "
+        "TV is the total variation of the threshold trajectory. "
+        "$\\bar{t}\\bar{t}$ and $h\\to4b$ report mean signal efficiencies restricted to in-band chunks."
+    )
+    write_adt_table(rows, tex_path, caption=caption, label="tab:adt_summary")
+
+    print(f"[OK] wrote {csv_path}")
+    print(f"[OK] wrote {tex_path}")
 
     # ------------------------- Convert to arrays + scale -------------------------
     RATE_SCALE_KHZ = 400.0

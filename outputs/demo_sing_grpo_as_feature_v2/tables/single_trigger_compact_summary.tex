@@ -1,0 +1,25 @@
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{6pt}
+\renewcommand{\arraystretch}{1.10}
+\begin{tabular}{llrrrrrrr}
+\hline
+Trigger & Method & MAE$\downarrow$ & P95$|e|$$\downarrow$ & InBand$\uparrow$ & UpViol$\downarrow$ & TV$\downarrow$ & $t\bar{t}\uparrow$ & $h\rightarrow 4b\uparrow$ \\
+\hline
+\multicolumn{9}{l}{\textbf{AD trigger}} \\
+AD & Constant & 0.164 & 0.216 & 0.016 & \textbf{0.000} & \textbf{0.000} & 90.201 & 17.098 \\
+AD & PID & 0.031 & 0.068 & 0.457 & 1.45e-04 & 94.069 & 93.537 & 22.506 \\
+AD & DQN & \textbf{0.015} & \textbf{0.034} & \textbf{0.823} & 0.001 & 373.500 & \textbf{93.981} & \textbf{22.962} \\
+AD & GRPO & 0.016 & 0.044 & 0.796 & 0.001 & 363.855 & 93.649 & 22.347 \\
+\hline
+\multicolumn{9}{l}{\textbf{HT trigger}} \\
+HT & Constant & 0.179 & 0.236 & 0.016 & \textbf{0.000} & \textbf{0.000} & 94.457 & 18.398 \\
+HT & PID & 0.025 & 0.055 & 0.586 & 1.34e-04 & 181.275 & 97.824 & 24.906 \\
+HT & DQN & \textbf{0.014} & \textbf{0.034} & \textbf{0.855} & 4.30e-05 & 688.000 & 97.946 & \textbf{25.741} \\
+HT & GRPO & 0.017 & 0.046 & 0.801 & 6.08e-04 & 427.500 & \textbf{97.972} & 25.715 \\
+\hline
+\end{tabular}
+\caption{Summary of single-trigger control. Rates are in percent units with target $r^*=0.250\%$ and tolerance $\pm 0.025\%$. InBand is the fraction of chunks within $|r-r^*|\le\tau$. UpViol measures upward band violations. TV is total cut variation. $t\bar t$ and $h\rightarrow 4b$ are mean signal efficiencies conditioned on in-band chunks.}
+\label{tab:single_trigger_summary_paper}
+\end{table}

@@ -383,8 +383,8 @@ def plot_inband_eff_bars_multi(summary_by_method, title, outpath, run_label):
     """
     summary_by_method: dict(name -> summarize_compact(...) dict)
     """
-    labels = ["ttbar", "HToAATo4B"]
-    keys   = ["TT_inband", "AA_inband"]
+    labels = [r"$t\bar{t}$", r"$h\rightarrow 4b$"]
+    keys   = ["tt", "h_to_4b"]
     methods = list(summary_by_method.keys())
 
     vals = np.array([[summary_by_method[m][k] for k in keys] for m in methods], dtype=np.float64)  # (M,3)
@@ -433,7 +433,7 @@ def main():
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--beta-kl", type=float, default=0.02)
     ap.add_argument("--ent-coef", type=float, default=0.01)
-    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--lr", type=float, default=3e-4)
 
     # objective/reward
     ap.add_argument("--target", type=float, default=0.25)   # percent
@@ -574,7 +574,7 @@ def main():
         target=target,
         tol=tol,
         mode="lex",        # "lex" recommended; "lag" if you want adaptive lambda
-        mix=0.5,
+        mix=0.75, #increase for tt
         alpha_sig=1.0,
         beta_move=0.02,
         gamma_stab=0.25,
@@ -616,7 +616,7 @@ def main():
                 target=target,
                 tol=tol,
                 mode="lex",        # "lex" recommended
-                mix=0.5,
+                mix=0.75,
                 alpha_sig=1.0,
                 beta_move=0.02,
                 gamma_stab=0.25,
@@ -1538,10 +1538,10 @@ def main():
         "GRPO": Cut_grpo,
     }
 
-    sum_const_ad = summarize_compact(R_const_pct, TT_const, AA_const, Cut_const_ad, target, tol)
-    sum_pd_ad    = summarize_compact(R_pd_pct,    TT_pd,    AA_pd,    Cut_pd,       target, tol)
-    sum_dqn_ad   = summarize_compact(R_dqn_pct,   TT_dqn,   AA_dqn,   Cut_dqn,      target, tol)
-    sum_gr_ad    = summarize_compact(R_grpo_pct,  TT_grpo,  AA_grpo,  Cut_grpo,     target, tol)
+    sum_const_ad = summarize_paper_table(R_const_pct, TT_const, AA_const, Cut_const_ad, target, tol)
+    sum_pd_ad    = summarize_paper_table(R_pd_pct,    TT_pd,    AA_pd,    Cut_pd,       target, tol)
+    sum_dqn_ad   = summarize_paper_table(R_dqn_pct,   TT_dqn,   AA_dqn,   Cut_dqn,      target, tol)
+    sum_gr_ad    = summarize_paper_table(R_grpo_pct,  TT_grpo,  AA_grpo,  Cut_grpo,     target, tol)
     summ_ad = {"Constant": sum_const_ad, "PID": sum_pd_ad, "DQN": sum_dqn_ad, "GRPO": sum_gr_ad}
 
     plot_cdf_abs_err_multi(
@@ -1591,10 +1591,10 @@ def main():
             "GRPO": Cut_ht_grpo,
         }
 
-        sum_const_ht = summarize_compact(R_ht_const_pct, TT_ht_const, AA_ht_const, Cut_const_ht, target, tol)
-        sum_pd_ht    = summarize_compact(R_ht_pd_pct,    TT_ht_pd,    AA_ht_pd,    Cut_ht_pd,    target, tol)
-        sum_dqn_ht   = summarize_compact(R_ht_dqn_pct,   TT_ht_dqn,   AA_ht_dqn,   Cut_ht_dqn,   target, tol)
-        sum_gr_ht    = summarize_compact(R_ht_grpo_pct,  TT_ht_grpo,  AA_ht_grpo,  Cut_ht_grpo,  target, tol)
+        sum_const_ht = summarize_paper_table(R_ht_const_pct, TT_ht_const, AA_ht_const, Cut_const_ht, target, tol)
+        sum_pd_ht    = summarize_paper_table(R_ht_pd_pct,    TT_ht_pd,    AA_ht_pd,    Cut_ht_pd,    target, tol)
+        sum_dqn_ht   = summarize_paper_table(R_ht_dqn_pct,   TT_ht_dqn,   AA_ht_dqn,   Cut_ht_dqn,   target, tol)
+        sum_gr_ht    = summarize_paper_table(R_ht_grpo_pct,  TT_ht_grpo,  AA_ht_grpo,  Cut_ht_grpo,  target, tol)
         summ_ht = {"Constant": sum_const_ht, "PID": sum_pd_ht, "DQN": sum_dqn_ht, "GRPO": sum_gr_ht}
 
 

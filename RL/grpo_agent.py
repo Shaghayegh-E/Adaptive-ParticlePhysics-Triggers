@@ -302,6 +302,7 @@ class GRPOAgent:
         # signal term (normalize to ~[0,1])
         tt = float(tt_after) / 100.0
         aa = float(aa_after) / 100.0
+        sig_mix = float(rcfg.mix) * tt + (1.0 - float(rcfg.mix)) * aa
 
         # TT as a *constraint* (penalty only if below floor)
         tt_short = max(0.0, float(rcfg.tt_floor) - tt)
@@ -312,11 +313,11 @@ class GRPOAgent:
         if rcfg.mode.lower().startswith("lex"):
             if err > 1.0:
                 # outside band: ignore signal completely; only punish violation keep a tiny AA preference to break ties
-                r = - rcfg.k_violate * violation - tt_floor_pen + rcfg.eps_sig_oob * aa
+                r = - rcfg.k_violate * violation - tt_floor_pen + rcfg.eps_sig_oob * sig_mix
             else:
                 # in-band: reward physics and regularize actuation 
                 r = (
-                    rcfg.alpha_sig * aa
+                    rcfg.alpha_sig * sig_mix
                     - tt_floor_pen
                     - rcfg.beta_move * move_pen
                     - rcfg.gamma_stab * stab_pen
@@ -335,6 +336,7 @@ class GRPOAgent:
             - rcfg.beta_move * move_pen
             - rcfg.gamma_stab * stab_pen
             - rcfg.w_occ * float(occ_mid) * move_pen
+            - tt_floor_pen
         )
 
         # Update dual ONLY on executed action (set update_dual=True there)
