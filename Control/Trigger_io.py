@@ -6,29 +6,25 @@ DATA_PATH = Path(__file__).resolve().parents[1] / "Data" / "Trigger_food_MC.h5"
 
 def read_mc_data(h5_file_path):
     with h5py.File(h5_file_path, 'r') as h5_file:
-        Bas01_tot = h5_file['mc_bkg_score01'][:]
-        Bas04_tot = h5_file['mc_bkg_score04'][:]
-        Bht_tot   = h5_file['mc_bkg_ht'][:]
-        B_npvs    = h5_file['mc_bkg_Npv'][:]
+        Bas_tot = h5_file['bkg_score02'][:]
+        Bht_tot   = h5_file['bkg_ht'][:]
+        B_npvs    = h5_file['bkg_Npv'][:]
 
-        Sas01_tot1 = h5_file['mc_tt_score01'][:]
-        Sas04_tot1 = h5_file['mc_tt_score04'][:]
-        Sht_tot1   = h5_file['mc_tt_ht'][:]
+        Sas_tot1 = h5_file['tt_score02'][:]
+        Sht_tot1   = h5_file['tt_ht'][:]
         S_npvs1    = h5_file['tt_Npv'][:]
 
-        Sas01_tot2 = h5_file['mc_aa_score01'][:]
-        Sas04_tot2 = h5_file['mc_aa_score04'][:]
-        Sht_tot2   = h5_file['mc_aa_ht'][:]
+        Sas_tot2 = h5_file['aa_score02'][:]
+        Sht_tot2   = h5_file['aa_ht'][:]
         S_npvs2    = h5_file['aa_Npv'][:]
 
     return (
-        Sas01_tot1, Sas04_tot1, Sht_tot1, S_npvs1,
-        Sas01_tot2, Sas04_tot2, Sht_tot2, S_npvs2,
-        Bas01_tot,  Bas04_tot,  Bht_tot,  B_npvs
+        Sas_tot1, Sht_tot1, S_npvs1,
+        Sas_tot2, Sht_tot2, S_npvs2,
+        Bas_tot,  Bht_tot,  B_npvs
     )
 
 
-import h5py, numpy as np
 
 def load_trigger_food_mc(path: str): #used for Local_Multi.py or Multi_path.py
     with h5py.File(path, "r") as f:

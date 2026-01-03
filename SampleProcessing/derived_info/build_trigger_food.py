@@ -1,289 +1,321 @@
-# derived_info/build_trigger_food.py
-from __future__ import annotations
+# derived_info/build_trigger_food_v2.py
+# h5 returns (jest, ht, npv)
+# X = [flatten(jets(8×3))=24, npv=1]
+
+from __future__ import annotations 
 import argparse
-import numpy as np
+from pathlib import Path
 from typing import Dict, Any, Tuple
-import h5py  # for inline NPV pairing I/O
-from .preprocess import process_h5_file
-from .scoring import load_autoencoders, calculate_batch_loss, calculate_H_met, count_njets
+import matplotlib.pyplot as plt
+import mplhep as hep
+hep.style.use("CMS")
+import numpy as np
+import h5py
+
+# use the updated readers from ae/data.py
+# (adjust import if your package layout differs)
+from ..ae.data import process_h5_file_MC, process_h5_file_Data
+#only read in load_autoencoder for dim=2 model
+from .scoring import load_autoencoder, count_njets
 from .data_io import write_trigger_food
 
+
+# -------------------------
+# Helpers
+# -------------------------
+
+def ensure_parent_dir(path_like: str) -> None:
+    p = Path(path_like)
+    if p.parent and str(p.parent) != "":
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+
+def jets_npv_to_X(jets: np.ndarray, npv: np.ndarray) -> np.ndarray:
+    """
+    jets: (N, 8, 3) with [eta, phi, pt]
+    npv:  (N,) or (N,1)
+
+    returns X: (N, 25) = flatten(jets)->24 + npv->1
+    """
+    jets = np.asarray(jets, dtype=np.float32)
+    npv = np.asarray(npv, dtype=np.float32)
+    jets_flat = jets.reshape(jets.shape[0], -1)  # (N, 24)
+    if npv.ndim == 1:
+        npv = npv.reshape(-1, 1)
+    return np.concatenate([jets_flat, npv], axis=1).astype(np.float32)
+
+
+def ae_mse_scores(ae, X: np.ndarray, batch_size: int = 4096) -> np.ndarray:
+    """
+    Score AE with per-event MSE on X (N,25).
+    Works for your ReLU AE trained as reconstruct(X)->X.
+    """
+    X = np.asarray(X, dtype=np.float32)
+    Xhat = ae.predict(X, batch_size=batch_size, verbose=0)
+    return np.mean((X - Xhat) ** 2, axis=1).astype(np.float32)
+
+
+def load_sample(bkgType: str, path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Returns jets, ht, npv.
+    Background uses RealData reader only if bkgType=RealData.
+    AA/TT are always MC 
+    """
+    if bkgType == "RealData":
+        jets, ht, npv = process_h5_file_Data(path)
+    else:
+        jets, ht, npv = process_h5_file_MC(path)
+    return jets, ht, npv.flatten()
+
+
+def plot_anomaly_score_distribution(
+    h5_path: str,
+    bkgType: str,
+    ae_dim: int,
+    out_dir: str | None = None,
+    cut_quantile: float = 99.75,
+    max_points: int = 300_000,
+    bins: int = 90,
+    show: bool = True,
+) -> None:
+    """
+    Plot anomaly score (AE MSE) distributions for bkg vs tt vs aa
+    from the Trigger_food_*.h5 written by this script.
+
+    - Saves: anomaly_score_dist_raw_*.pdf/png and anomaly_score_dist_log10_*.pdf/png
+    - Also shows interactively if show=True (may no-op on headless nodes).
+    """
+    score_key = f"score{ae_dim:02d}"  # e.g. score02
+
+
+    k_bkg = f"bkg_{score_key}"
+    k_tt  = f"tt_{score_key}"
+    k_aa  = f"aa_{score_key}"
+
+
+    def _read_downsample(dset, max_points: int):
+        n = dset.shape[0]
+        if max_points is None or max_points <= 0 or n <= max_points:
+            return np.asarray(dset[:], dtype=np.float32)
+        stride = int(np.ceil(n / max_points))
+        return np.asarray(dset[::stride], dtype=np.float32)
+
+    h5_path = str(h5_path)
+    out_dir = out_dir or str(Path(h5_path).parent)
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(h5_path, "r") as h5:
+        for k in (k_bkg, k_tt, k_aa):
+            if k not in h5:
+                raise KeyError(f"Missing dataset '{k}' in {h5_path}. Keys: {list(h5.keys())}")
+
+        bkg = _read_downsample(h5[k_bkg], max_points)
+        tt  = _read_downsample(h5[k_tt],  max_points)
+        aa  = _read_downsample(h5[k_aa],  max_points)
+
+    tag = f"{Path(h5_path).stem}_{bkgType}_dim{ae_dim:02d}"
+
+    # background cut
+    cut = float(np.percentile(bkg, cut_quantile))
+    pass_b = 100.0 * float(np.mean(bkg > cut))
+    eff_tt = 100.0 * float(np.mean(tt  > cut))
+    eff_aa = 100.0 * float(np.mean(aa  > cut))
+
+    
+def add_cms_header(fig, left_x=0.13, right_x=0.90, y=0.95):
+    """
+    Add 'CMS Open Data' on the left and 'Run 283876' on the right
+    in figure coordinates.
+    """
+    fig.text(
+        left_x, y, "CMS Open Data",
+        ha="left", va="top",
+        fontweight="bold", fontsize=24
+    )
+    fig.text(
+        right_x, y, "Run 283876",
+        ha="right", va="top",
+        fontsize=24
+    )
+
+
+
+# -------------------------
+# Main pipeline
+# -------------------------
+
+def _match_to_data(data_npvs, sig_ht, sig_score, sig_npvs, sig_njets):
+        order = np.argsort(sig_npvs)
+        sig_ht = sig_ht[order]
+        sig_score = sig_score[order]
+        sig_npvs = sig_npvs[order]
+        sig_njets = sig_njets[order]
+
+        m_ht, m_sc, m_npv, m_nj = [], [], [], []
+        for npv in data_npvs:
+            L = np.searchsorted(sig_npvs, npv, side="left")
+            R = np.searchsorted(sig_npvs, npv, side="right")
+            if L >= len(sig_npvs):
+                idx = len(sig_npvs) - 1
+            elif L == R:
+                idx = L
+            else:
+                idx = np.random.randint(L, R)
+            m_ht.append(sig_ht[idx]); m_sc.append(sig_score[idx])
+            m_npv.append(sig_npvs[idx]); m_nj.append(sig_njets[idx])
+        return np.array(m_ht), np.array(m_sc), np.array(m_npv), np.array(m_nj)
+
+
 def run_pipeline(
-    mb2_path: str,
-    htoaa_path: str,
+    bkgType: str,
+    bkg_path: str,
+    aa_path: str,
     tt_path: str,
-    ae01_path: str,
-    ae04_path: str,
+    ae_dim: int,
+    ae_path: str,
     out_path: str,
 ) -> None:
-    # Load models
-    ae01, ae04 = load_autoencoders((ae01_path, ae04_path))
+    # Load model (load_autoencoders returns tuple; we pass 1 path for dim=2
+    ae = load_autoencoder(ae_path)
 
-    # Load and preprocess datasets
-    mc_bkg_jets, mc_bkg_ht = process_h5_file(mb2_path)
-    mc_aa_jets,  mc_aa_ht  = process_h5_file(htoaa_path)
-    mc_tt_jets,  mc_tt_ht  = process_h5_file(tt_path)
+    # Load and preprocess datasets (jets, ht, npv)
+    bkg_jets, bkg_ht, bkg_npv = load_sample(bkgType, bkg_path)
+    aa_jets,  aa_ht,  aa_npv  = load_sample(bkgType, aa_path)
+    tt_jets,  tt_ht,  tt_npv  = load_sample(bkgType, tt_path)
 
-    # Derived features
-    mc_bkg_Hmets = calculate_H_met(mc_bkg_jets, mc_bkg_ht)
-    mc_aa_Hmets  = calculate_H_met(mc_aa_jets,  mc_aa_ht)
-    mc_tt_Hmets  = calculate_H_met(mc_tt_jets,  mc_tt_ht)
+    # # Derived features (should still work if calculate_H_met/count_njets assume pt is index 2)
+    # bkg_Hmets = calculate_H_met(bkg_jets, bkg_ht)
+    # aa_Hmets  = calculate_H_met(aa_jets,  aa_ht)
+    # tt_Hmets  = calculate_H_met(tt_jets,  tt_ht)
 
-    # NPV: stored in 4th column of first jet (identical across jets per event)
-    mc_bkg_npvs = mc_bkg_jets[:, 0, 3]
-    mc_aa_npvs  = mc_aa_jets[:,  0, 3]
-    mc_tt_npvs  = mc_tt_jets[:,  0, 3]
+    bkg_njets = count_njets(bkg_jets)
+    aa_njets  = count_njets(aa_jets)
+    tt_njets  = count_njets(tt_jets)
 
     # Keys for bookkeeping
-    aa_key = np.ones_like(mc_aa_npvs, dtype=np.int32) * 1
-    tt_key = np.ones_like(mc_tt_npvs, dtype=np.int32) * 2
+    #aa_key = np.ones_like(aa_npv, dtype=np.int32) * 1
+    #tt_key = np.ones_like(tt_npv, dtype=np.int32) * 2
 
-    # Scores
-    mc_bkg_scores01 = calculate_batch_loss(ae01, mc_bkg_jets)
-    mc_aa_scores01  = calculate_batch_loss(ae01, mc_aa_jets)
-    mc_tt_scores01  = calculate_batch_loss(ae01, mc_tt_jets)
+    # AE scores on X = [jets_flat, npv]
+    X_bkg = jets_npv_to_X(bkg_jets, bkg_npv)
+    X_aa  = jets_npv_to_X(aa_jets,  aa_npv)
+    X_tt  = jets_npv_to_X(tt_jets,  tt_npv)
 
-    mc_bkg_scores04 = calculate_batch_loss(ae04, mc_bkg_jets)
-    mc_aa_scores04  = calculate_batch_loss(ae04, mc_aa_jets)
-    mc_tt_scores04  = calculate_batch_loss(ae04, mc_tt_jets)
+    bkg_score = ae_mse_scores(ae, X_bkg)
+    aa_score  = ae_mse_scores(ae, X_aa)
+    tt_score  = ae_mse_scores(ae, X_tt)
 
-    # Counts
-    mc_bkg_njets = count_njets(mc_bkg_jets)
-    mc_aa_njets  = count_njets(mc_aa_jets)
-    mc_tt_njets  = count_njets(mc_tt_jets)
+    
+    score_key = f"score{ae_dim:02d}"  # e.g. score02
 
-    # Pack & write
+    
     arrays: Dict[str, Any] = {
-        "mc_bkg_ht":      mc_bkg_ht.astype(np.float32),
-        "mc_bkg_Hmets":   mc_bkg_Hmets.astype(np.float32),
-        "mc_bkg_score01": mc_bkg_scores01.astype(np.float32),
-        "mc_bkg_score04": mc_bkg_scores04.astype(np.float32),
-        "mc_bkg_Npv":     mc_bkg_npvs.astype(np.float32),
-        "mc_bkg_njets":   mc_bkg_njets.astype(np.float32),
+        "bkg_ht":        np.asarray(bkg_ht, dtype=np.float32),
+        f"bkg_{score_key}": bkg_score,
+        "bkg_Npv":       np.asarray(bkg_npv, dtype=np.float32),
+        "bkg_njet":       np.asarray(bkg_njets, dtype=np.float32),
 
-        "mc_aa_ht":       mc_aa_ht.astype(np.float32),
-        "mc_aa_Hmets":    mc_aa_Hmets.astype(np.float32),
-        "mc_aa_score01":  mc_aa_scores01.astype(np.float32),
-        "mc_aa_score04":  mc_aa_scores04.astype(np.float32),
-        "aa_Npv":         mc_aa_npvs.astype(np.float32),
-        "aa_key":         aa_key.astype(np.int32),
-        "mc_aa_njets":    mc_aa_njets.astype(np.float32),
+        "aa_ht":         np.asarray(aa_ht, dtype=np.float32),
+        f"aa_{score_key}": aa_score,
+        "aa_Npv":           np.asarray(aa_npv, dtype=np.float32),
+        "aa_njet":       np.asarray(aa_njets, dtype=np.float32),
 
-        "mc_tt_ht":       mc_tt_ht.astype(np.float32),
-        "mc_tt_Hmets":    mc_tt_Hmets.astype(np.float32),
-        "mc_tt_score01":  mc_tt_scores01.astype(np.float32),
-        "mc_tt_score04":  mc_tt_scores04.astype(np.float32),
-        "tt_Npv":         mc_tt_npvs.astype(np.float32),
-        "tt_key":         tt_key.astype(np.int32),
-        "mc_tt_njets":    mc_tt_njets.astype(np.float32),
+        "tt_ht":         np.asarray(tt_ht, dtype=np.float32),
+        f"tt_{score_key}": tt_score,
+        "tt_Npv":           np.asarray(tt_npv, dtype=np.float32),
+        "tt_njet":       np.asarray(tt_njets, dtype=np.float32),
     }
+    
+    if bkgType == "RealData":
+        arrays["tt_ht"], arrays[f"tt_{score_key}"], arrays["tt_Npv"], arrays["tt_njet"] = _match_to_data(
+        arrays["bkg_Npv"], arrays["tt_ht"], arrays[f"tt_{score_key}"], arrays["tt_Npv"], arrays["tt_njet"]
+        )
+        
+        arrays["aa_ht"], arrays[f"aa_{score_key}"], arrays["aa_Npv"], arrays["aa_njet"] = _match_to_data(
+        arrays["bkg_Npv"], arrays["aa_ht"], arrays[f"aa_{score_key}"], arrays["aa_Npv"], arrays["aa_njet"]
+        )
+    
+
+    
+
+    ensure_parent_dir(out_path)
     write_trigger_food(out_path, arrays)
-# -------------------------- REALDATA PAIRING HELPERS -------------------------
-
-
-def _read_h5_for_pairing(file_path: str) -> Tuple[
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
-]:
-    """
-    Equivalent to read_h5_data() from Data_pairing_NPV.py.
-
-    Reads Trigger_food_Data.h5 and returns all arrays needed for NPV pairing.
-    """
-    with h5py.File(file_path, "r") as h5_file:
-        # Background
-        data_ht       = h5_file["mc_bkg_ht"][:]
-        data_scores01 = h5_file["mc_bkg_score01"][:]
-        data_scores04 = h5_file["mc_bkg_score04"][:]
-        data_npvs     = h5_file["mc_bkg_Npv"][:]
-        data_njets    = h5_file["mc_bkg_njets"][:]
-
-        # TTbar
-        tt_ht         = h5_file["mc_tt_ht"][:]
-        tt_scores01   = h5_file["mc_tt_score01"][:]
-        tt_scores04   = h5_file["mc_tt_score04"][:]
-        tt_npvs       = h5_file["tt_Npv"][:]
-        tt_njets      = h5_file["mc_tt_njets"][:]
-
-        # H→AA→4b
-        aa_ht         = h5_file["mc_aa_ht"][:]
-        aa_scores01   = h5_file["mc_aa_score01"][:]
-        aa_scores04   = h5_file["mc_aa_score04"][:]
-        aa_npvs       = h5_file["aa_Npv"][:]
-        aa_njets      = h5_file["mc_aa_njets"][:]
-
-    return (
-        data_ht, data_scores01, data_scores04, data_npvs, data_njets,
-        tt_ht, tt_scores01, tt_scores04, tt_npvs, tt_njets,
-        aa_ht, aa_scores01, aa_scores04, aa_npvs, aa_njets,
+    print(f"[OK] Wrote Trigger_food to {out_path} (AE dim={ae_dim})")
+    # --- plot anomaly score distributions for the above file ---
+    plot_anomaly_score_distribution(
+        h5_path=out_path,
+        bkgType=bkgType,
+        ae_dim=ae_dim,
+        out_dir=str(Path(out_path).parent),  # save next to the H5
+        cut_quantile=99.75,
+        max_points=300_000,   # downsample if huge
+        bins=90,
+        show=True,            # set False on headless machines
     )
 
 
-def _match_to_data(
-    data_npvs: np.ndarray,
-    sig_ht: np.ndarray,
-    sig_scores: np.ndarray,
-    sig_npvs: np.ndarray,
-    sig_njets: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Equivalent to match_to_data() from Data_pairing_NPV.py.
-
-    For each NPV value in the *background* distribution, pick a signal event
-    with a nearby NPV, and copy over (ht, score, npv, njets).
-    """
-    sorted_indices = np.argsort(sig_npvs)
-    sig_ht_sorted     = sig_ht[sorted_indices]
-    sig_scores_sorted = sig_scores[sorted_indices]
-    sig_npvs_sorted   = sig_npvs[sorted_indices]
-    sig_njets_sorted  = sig_njets[sorted_indices]
-
-    matched_ht = []
-    matched_scores = []
-    matched_npvs = []
-    matched_njets = []
-
-    for npv in data_npvs:
-        idx_left = np.searchsorted(sig_npvs_sorted, npv, side="left")
-        idx_right = np.searchsorted(sig_npvs_sorted, npv, side="right")
-
-        if idx_left == len(sig_npvs_sorted):
-            idx = len(sig_npvs_sorted) - 1
-        elif idx_left == idx_right:
-            idx = idx_left
-        else:
-            idx = np.random.randint(idx_left, idx_right)
-
-        matched_ht.append(sig_ht_sorted[idx])
-        matched_scores.append(sig_scores_sorted[idx])
-        matched_npvs.append(sig_npvs_sorted[idx])
-        matched_njets.append(sig_njets_sorted[idx])
-
-    return (
-        np.array(matched_ht),
-        np.array(matched_scores),
-        np.array(matched_npvs),
-        np.array(matched_njets),
-    )
+# -------------------------
+# Pairing (update to new score key)
+# -------------------------
 
 
-def run_pairing_npv(input_file: str, output_file: str) -> None:
-    """
-    RealData-only step: replicate Data_pairing_NPV.py.
-
-    Reads Trigger_food_Data.h5 (input_file) and writes
-    Matched_data_2016_with04.h5 (or user-specified output_file).
-    """
-    (
-        data_ht, data_scores01, data_scores04, data_npvs, data_njets,
-        tt_ht, tt_scores01, tt_scores04, tt_npvs, tt_njets,
-        aa_ht, aa_scores01, aa_scores04, aa_npvs, aa_njets,
-    ) = _read_h5_for_pairing(input_file)
-
-    # TTbar
-    matched_tt_ht, matched_tt_scores01, matched_tt_npvs, matched_tt_njets = _match_to_data(
-        data_npvs, tt_ht, tt_scores01, tt_npvs, tt_njets
-    )
-    _, matched_tt_scores04, _, _ = _match_to_data(
-        data_npvs, tt_ht, tt_scores04, tt_npvs, tt_njets
-    )
-
-    # H→AA→4b
-    matched_aa_ht, matched_aa_scores01, matched_aa_npvs, matched_aa_njets = _match_to_data(
-        data_npvs, aa_ht, aa_scores01, aa_npvs, aa_njets
-    )
-    _, matched_aa_scores04, _, _ = _match_to_data(
-        data_npvs, aa_ht, aa_scores04, aa_npvs, aa_njets
-    )
-
-    # Save output
-    with h5py.File(output_file, "w") as h5_out:
-        # Background
-        h5_out.create_dataset("data_ht",        data=data_ht)
-        h5_out.create_dataset("data_scores01",  data=data_scores01)
-        h5_out.create_dataset("data_scores04",  data=data_scores04)
-        h5_out.create_dataset("data_Npv",       data=data_npvs)
-        h5_out.create_dataset("data_njets",     data=data_njets)
-
-        # TTbar
-        h5_out.create_dataset("matched_tt_ht",        data=matched_tt_ht)
-        h5_out.create_dataset("matched_tt_scores01",  data=matched_tt_scores01)
-        h5_out.create_dataset("matched_tt_scores04",  data=matched_tt_scores04)
-        h5_out.create_dataset("matched_tt_npvs",      data=matched_tt_npvs)
-        h5_out.create_dataset("matched_tt_njets",     data=matched_tt_njets)
-
-        # H→AA→4b
-        h5_out.create_dataset("matched_aa_ht",        data=matched_aa_ht)
-        h5_out.create_dataset("matched_aa_scores01",  data=matched_aa_scores01)
-        h5_out.create_dataset("matched_aa_scores04",  data=matched_aa_scores04)
-        h5_out.create_dataset("matched_aa_npvs",      data=matched_aa_npvs)
-        h5_out.create_dataset("matched_aa_njets",     data=matched_aa_njets)
-
-    print(f"[RealData] Pairing completed and saved to: {output_file}")
-
-
+# -------------------------
+# CLI
+# -------------------------
 def build_argparser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Build Trigger_food HDF5 from CMS jets + AE scores")
+    p = argparse.ArgumentParser(description="Build Trigger_food HDF5 using new readers + ReLU AE on X=(jets_flat,npv)")
+
+    p.add_argument("--bkgType", default="MC", choices=["MC", "RealData"])
+
     # Inputs
-    p.add_argument("--minbias2", default="Data/MinBias_2.h5", help="MC background file")
-    p.add_argument("--htoaa",    default="Data/HToAATo4B.h5",  help="BSM signal file")
-    p.add_argument("--tt",       default="Data/TT_1.h5",       help="SM ttbar signal file")
-    # Models
-    p.add_argument("--ae01", default="SampleProcessing/models/autoencoder_model0_1.keras")
-    p.add_argument("--ae04", default="SampleProcessing/models/autoencoder_model0_4.keras")
-    p.add_argument("--control", default="MC", choices = ["MC", "RealData"], help="Control sample type: MC or RealData")
-    # Output
-    p.add_argument("--out", default="Data/Trigger_food_MC.h5", help="Output HDF5 path") #building Data/trigger_food_MC
-    p.add_argument(
-        "--out-paired",
-        default="Data/Matched_data_2016_with04.h5",
-        help="Output HDF5 path for NPV-paired RealData (used only if control=RealData).",
-    )
+    p.add_argument("--MCBkg", default="Data/MinBias_2.h5", help="MC background (if bkgType=MC)")
+    p.add_argument("--dataBkg",    default="Data/data_Run_2016_283408_longest.h5", help="Real background (if bkgType=RealData)")
+    p.add_argument("--BSMSig",   default="Data/HToAATo4B.h5")
+    p.add_argument("--SMSig",      default="Data/TT_1.h5")
+
+    # AE (default dim=2)
+    p.add_argument("--ae-dim", type=int, default=2)
+
+    # Outputs
+    p.add_argument("--out", default="Data/Trigger_food_MC.h5")
+    p.add_argument("--ae_path", default="SampleProcessing/models/autoencoder_model_mc_2.keras")
+    p.add_argument("--force_ae_path", default=False)
+    #p.add_argument("--out-paired", default="Data/Matched_data_2016.h5")
+
     return p
+
 
 def main():
     args = build_argparser().parse_args()
-    # ----- Model paths + output path handling -----
-    if args.control == "RealData":
-        # Swap to RealData-trained AEs if user kept MC defaults
-        if args.ae01 == "SampleProcessing/models/autoencoder_model0_1_realdata.keras":
-            ae01 = "Data/python/autoencoder_model0_1_realdata.keras"
-        else:
-            ae01 = args.ae01
 
-        if args.ae04 == "SampleProcessing/models/autoencoder_model0_4_realdata.keras":
-            ae04 = "Data/python/autoencoder_model0_4_realdata.keras"
-        else:
-            ae04 = args.ae04
+    # Choose background file
+    bkg_path = args.dataBkg if args.bkgType == "RealData" else args.MCBkg
+    default_ae_path_mc="SampleProcessing/models/autoencoder_model_mc_2.keras"
+    default_ae_path_data="SampleProcessing/models/autoencoder_model_realdata_2.keras"
+    
+    # Default output names 
+    if args.out == "Data/Trigger_food_MC.h5" and args.bkgType == "RealData":
+        out = "Data/Trigger_food_Data.h5"
+        ae_path_string = default_ae_path_data
 
-        # Default Trigger_food output name for RealData
-        if args.control == "RealData":
-            out = "Data/Trigger_food_Data.h5"
-        else:
-            out = "Data/Trigger_food_MC.h5"
-
-        # Also prepare the paired output path
-        out_paired = args.out_paired
     else:
-        # MC: behaviour unchanged
-        ae01 = args.ae01
-        ae04 = args.ae04
         out = args.out
-        out_paired = None  # not used
+        ae_path_string = default_ae_path_mc
+        
+    if args.force_ae_path :
+        ae_path_string = args.ae_path
+
     run_pipeline(
-        mb2_path=args.minbias2,
-        htoaa_path=args.htoaa,
-        tt_path=args.tt,
-        ae01_path=ae01,
-        ae04_path=ae04,
+        bkgType=args.bkgType,
+        bkg_path=bkg_path,
+        aa_path=args.BSMSig,
+        tt_path=args.SMSig,
+        ae_dim=args.ae_dim,
+        ae_path=ae_path_string,
         out_path=out,
     )
-    # ----- Extra RealData: NPV pairing -----
-    if args.control == "RealData":
-        # mimics running Data_pairing_NPV.py after Data_Derived_info.py
-        run_pairing_npv(input_file=out, output_file=out_paired)
 
+    
 
 if __name__ == "__main__":
     main()

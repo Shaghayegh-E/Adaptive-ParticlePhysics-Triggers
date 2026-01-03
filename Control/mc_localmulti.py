@@ -8,7 +8,7 @@ try:
 except Exception:
     pass
 import os
-from .mc_singletrigger_io import load_trigger_food_mc
+from .Trigger_io import load_trigger_food_mc
 from .agents_local_multi import V3, local_V3, V1, local_V1, V2, local_V2, Trigger
 from .metrics import update_accumulated, average_perf_bins
 from .mc_singletrigger_plots import rate_efficiency_panels, plot_evolution, plot_evolution_ideal

@@ -10,7 +10,7 @@ try:
 except Exception:
     pass
 import os
-from .mc_singletrigger_io import load_trigger_food_mc
+from .Trigger_io import load_trigger_food_mc
 from .agents_multi_path import V3, V1, V2
 # from MC.trigger.metrics import comp_cost_test
 from .metrics import update_accumulated, comp_cost_test

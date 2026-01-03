@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 from typing import Dict, Tuple, Callable
 
-from .mc_singletrigger_io import load_trigger_food_summary_plots
+from .Trigger_io import load_trigger_food_summary_plots
 from .metrics import rate_above_threshold, comp_costs
 try:
     import atlas_mpl_style as aplt

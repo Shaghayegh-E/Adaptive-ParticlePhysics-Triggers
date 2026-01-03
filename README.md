@@ -68,8 +68,8 @@ git clone https://github.com/Shaghayegh-E/Adaptive-ParticlePhysics-Triggers.git
 cd Adaptive-ParticlePhysics-Triggers
 
 # create env (recommended)
-conda create -n jfti python=3.9 -y
-conda activate jfti
+conda create -n AutoTrig python=3.9 -y
+conda activate AutoTrig
 
 # install required packages
 pip install -r requirements.txt
@@ -82,11 +82,11 @@ After downloading, place them under the following structure.
 ```text
 Adaptive-ParticlePhysics-Triggers/
 ├── Data/                     # Place downloaded .h5 datasets here (from Zenodo and should be ignored by Git)
-│   ├── MinBias_1.h5
+│   ├── MinBias_1.h5 #used for training
 │   ├── MinBias_2.h5
 │   ├── TT_1.h5
 │   ├── HToAATo4B.h5
-│   ├── data_Run_2016_283876.h5
+│   ├── data_Run_2016_283876.h5 #used for training
 │   ├── data_Run_2016_283408_longest.h5
 │   ├── Trigger_food_MC.h5
 │   └── Trigger_food_Data.h5
@@ -94,19 +94,18 @@ Adaptive-ParticlePhysics-Triggers/
 ├── SampleProcessing/         
 │   ├── ae/                   # Autoencoder models & training scripts & building autoencoders for Anomaly Detection Algorithm. Data Samples: Data/MinBias_1 Data/HToAATo4B.h5 Data/TT_1.h5
 │   │   ├── data.py
-│   │   ├── experiment_testae.py #Only uses Data/MinBias_1.h5 for training.
+│   │   ├── experiment_testae.py 
 │   │   ├── losses.py
 │   │   ├── models.py
 │   │   └── plots.py
 │   │
-│   ├── derived_info/         # Build Data/MinBias_2.h5, Data/HToAATo4B.h5, Data/TT_1.h5, models/autoencoder_model0_1.keras, models/autoencoder_model0_4.keras -> Data/trigger_food_MC (monte carlo samples)
+│   ├── derived_info/         # Build Data/MinBias_2.h5, Data/HToAATo4B.h5, Data/TT_1.h5, models/autoencoder_model_2_mc.keras -> Data/trigger_food_MC (monte carlo samples)
 │   │   ├── build_trigger_food.py
 │   │   ├── data_io.py
 │   │   ├── preprocess.py
 │   │   └── scoring.py
-│   ├── models/               #saving trained autoencoders with dimension = 1 or 4
-│   │   ├── autoencoder_model0_1.keras #autoencoder with dimension = 1
-│   │   ├── autoencoder_model0_4.keras #autoencoder with dimension = 4
+│   ├── models/               #saving trained autoencoders with dimension = 2
+│   │   ├── autoencoder_model_mc_2.keras #autoencoder with dimension = 2
 │   
 ├── Control/   #Running single trigger / Local Multi Trigger and Multi Path trigger
 │   ├── agents.py
@@ -125,17 +124,36 @@ Adaptive-ParticlePhysics-Triggers/
 └── README.md
 ```
 ## Step 1 Training Autoencoder
-### Training Autoencoder with dimension = 1 or 4 
+### Training Autoencoder with dimension = 2 
+
+# use simulated events as background
 ```
-python3 -m SampleProcessing.ae.experiment_testae --dims=1
-python3 -m SampleProcessing.ae.experiment_testae --dims=4
+python3 -m SampleProcessing.ae.experiment_testae --dims=2
 ```
+# use real experiment events as background
+```
+python3 -m SampleProcessing.ae.experiment_testae --dims=2 --bkgType=RealData
+```
+
 ## Step 2 Building Trigger_food_MC
 ### Building Trigger_food_MC.h5 (building Monte Carlo Samples and store it under Data folder)
+# use simulated events as background
 ```
 python3 -m SampleProcessing.derived_info.build_trigger_food
 ```
+# use real experiment events as background
+```
+python3 -m SampleProcessing.derived_info.build_trigger_food --bkgType=RealData
+```
+
 ## Step 3 Choose different agents for Trigger Control (Control-only framework)
+
+### Single-path demo (PD controller on HT & AD)
+## use --bkgType=MC or RealData (default=MC)
+```
+python3 -m Control.mc_singletrigger --bkgType=RealData
+python3 -m Control.mc_singletrigger_plots --bkgType=RealData
+```
 ### Multi Trigger Control Framework Case 1/2/3
 ```
 python3 -m Control.mc_multipath --agent v1
@@ -155,11 +173,7 @@ python3 -m Control.mc_localmulti --agent v3 \
     --path Data/Trigger_food_MC.h5 \
     --outdir outputs/case3
 ```
-### Single-path demo (PD controller on HT & AS)
-```
-python3 -m Control.mc_singletrigger
-python3 -m Control.mc_singletrigger_plots 
-```
+
 ## Step 4 Generate Summary Plots
 ### Summary of different agents’ performance on simulation samples with autoencoder dimension = 1/4.
 
