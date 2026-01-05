@@ -1,8 +1,18 @@
-# singletrigger_io.py
+# Trigger_io.py
 import h5py
 import numpy as np
 from pathlib import Path
-DATA_PATH = Path(__file__).resolve().parents[1] / "Data" / "Trigger_food_MC.h5"
+
+
+import matplotlib.pyplot as plt
+import matplotlib.transforms as mtransforms
+
+from matplotlib.ticker import MaxNLocator
+import matplotlib.lines as mlines
+
+
+
+
 
 def read_mc_data(h5_file_path):
     with h5py.File(h5_file_path, 'r') as h5_file:
@@ -24,99 +34,156 @@ def read_mc_data(h5_file_path):
         Bas_tot,  Bht_tot,  B_npvs
     )
 
-
-
-def load_trigger_food_mc(path: str): #used for Local_Multi.py or Multi_path.py
-    with h5py.File(path, "r") as f:
-        D = {
-            # background
-            "mc_bkg_score01": f["mc_bkg_score01"][:],
-            "mc_bkg_ht":      f["mc_bkg_ht"][:],
-            "mc_bkg_Npv":     f["mc_bkg_Npv"][:],
-            "mc_bkg_njets":   f["mc_bkg_njets"][:],
-            # signal 1 (tt)
-            "mc_tt_score01":  f["mc_tt_score01"][:],
-            "mc_tt_ht":       f["mc_tt_ht"][:],
-            "tt_Npv":         f["tt_Npv"][:],
-            "mc_tt_njets":    f["mc_tt_njets"][:],
-            # signal 2 (aa)
-            "mc_aa_score01":  f["mc_aa_score01"][:],
-            "mc_aa_ht":       f["mc_aa_ht"][:],
-            "aa_Npv":         f["aa_Npv"][:],
-            "mc_aa_njets":    f["mc_aa_njets"][:],
-        }
-    return D
-
-def load_trigger_food_summary_plots(path: str):   #used for summary.py
+def load_trigger_food(path: str): #used for Multi Trigger Logics
     with h5py.File(path, 'r') as h5_file:
-        # Read datasets for background
-        Bas01_tot = h5_file['mc_bkg_score04'][:]
-        #Bas04_tot = h5_file['mc_bkg_score01'][:]
-        #Bas_tot = h5_file['mc_bkg_Hmets'][:]
-        Bht_tot = h5_file['mc_bkg_ht'][:]
-        B_npvs = h5_file['mc_bkg_Npv'][:]
-        B_njets = h5_file['mc_bkg_njets'][:]
-        
-        # Read datasets for signal
-        Sas01_tot1 = h5_file['mc_tt_score04'][:]
-        #Sas04_tot1 = h5_file['mc_dihiggs_score04'][:]
-        #Sas_tot1 = h5_file['mc_dijet_Hmets'][:]
-        Sht_tot1 = h5_file['mc_tt_ht'][:]
-        S_npvs1 = h5_file['tt_Npv'][:]
-        S_njets1 = h5_file['mc_tt_njets'][:]
-        #sig_key1 = h5_file['dijet_key'][:]  # Read signal keys if needed
+        Bas_tot = h5_file['bkg_score02'][:]
+        Bht_tot   = h5_file['bkg_ht'][:]
+        B_npvs    = h5_file['bkg_Npv'][:]
+        B_njets    = h5_file['bkg_njet'][:]
 
-        Sas01_tot2 = h5_file['mc_aa_score04'][:]
-        #Sas04_tot2 = h5_file['mc_tt_score04'][:]
-        #Sas_tot2 = h5_file['mc_ttbar_Hmets'][:]
-        Sht_tot2 = h5_file['mc_aa_ht'][:]
-        S_npvs2 = h5_file['aa_Npv'][:]
-        S_njets2 = h5_file['mc_aa_njets'][:]
-        #sig_key2 = h5_file['tt_key'][:]  # Read signal keys if needed
-        
-        # Read datasets for data
-        #data_ht = h5_file['data_ht'][:]
-        #data_score = h5_file['data_score'][:]
-        #data_npv = h5_file['data_Npv'][:]
-        
-    return Sas01_tot1, Sht_tot1, S_npvs1, S_njets1, Sas01_tot2, Sht_tot2, S_npvs2, S_njets2, Bas01_tot, Bht_tot, B_npvs, B_njets #,data_ht, data_score, data_npv
+        Sas_tot1 = h5_file['tt_score02'][:]
+        Sht_tot1   = h5_file['tt_ht'][:]
+        S_npvs1    = h5_file['tt_Npv'][:]
+        S_njets1    = h5_file['tt_njet'][:]
 
-### Real data #####
-def load_trigger_food_realdata(path: str): #used for real data
-        # Bas01_tot = h5_file['data_scores01'][:] #Zixin: update to scores01
-        # Bht_tot = h5_file['data_ht'][:]
-        # B_npvs = h5_file['data_Npv'][:]
-        # B_njets = h5_file['data_njets'][:]
+        Sas_tot2 = h5_file['aa_score02'][:]
+        Sht_tot2   = h5_file['aa_ht'][:]
+        S_npvs2    = h5_file['aa_Npv'][:]
+        S_njets2    = h5_file['aa_njet'][:]
+
+    return (
+        Sas_tot1, Sht_tot1, S_npvs1, S_njets1,
+        Sas_tot2, Sht_tot2, S_npvs2, S_njets2,
+        Bas_tot,  Bht_tot,  B_npvs, B_njets
+    )
+
+# all plotting (summary, evolution, figure save utils)
+
+def evolution(Ht_vals, AD_vals, title, outdir="outputs"):
+    plt.figure(figsize=(8,6))
+    plt.scatter(Ht_vals, AD_vals, c=np.arange(len(Ht_vals)),
+                marker='+', cmap="viridis", s=50)
+    plt.xlabel("Ht Cut"); plt.ylabel("AD Cut")
+    plt.xlim(np.min(Ht_vals) * 0.9, np.max(Ht_vals) * 1.1)
+    plt.ylim(np.min(AD_vals) * 0.9, np.max(AD_vals)* 1.1)
+
+    plt.title(title); plt.colorbar(label="Iteration Step")
+    #plt.legend(loc='best', frameon=True); plt.grid(True)
+    plt.savefig(f"{outdir}/{title}.pdf"); plt.close()
+
+def summary(abs_rb, rs, b_TC, b_EC, total_cost, perf, title, outdir="outputs"):
+    t = np.arange(len(abs_rb))
+    fig = plt.figure(figsize=(14,10))
+    plt.subplot(2,2,1); sc=plt.scatter(abs_rb, total_cost, c=t, cmap='viridis')
+    plt.xlabel('1/(1 - |rb - 0.25|)'); plt.ylabel('Total Computational Cost')
+    plt.title('Background Robustness vs Total Cost'); plt.colorbar(sc, label='Time')
+
+    plt.subplot(2,2,2); sc=plt.scatter(rs, total_cost, c=t, cmap='viridis')
+    plt.xlabel('rs'); plt.ylabel('Total Computational Cost')
+    plt.title('Signal Eff vs Total Cost'); plt.colorbar(sc, label='Time')
+
+    plt.subplot(2,2,3); sc=plt.scatter(perf, total_cost, c=t, cmap='viridis')
+    plt.xlabel('rs/(1 - |rb - 0.25|)'); plt.ylabel('Total Computational Cost')
+    plt.title('Performance vs Total Cost'); plt.colorbar(sc, label='Time')
+
+    plt.subplot(2,2,4); sc=plt.scatter(b_TC, b_EC, c=t, cmap='viridis')
+    plt.xlabel('Trigger Computational Cost'); plt.ylabel('Event Computational Cost')
+    plt.title('Event vs Trigger Cost'); plt.colorbar(sc, label='Time')
+
+    plt.tight_layout(); fig.savefig(f"{outdir}/{title}.pdf"); plt.close(fig)
 
 
-        # # Read datasets for signal
-        # # Sas01_tot1 = h5_file['matched_tt_scores'][:] #Giovanna: original
-        # Sas01_tot1 = h5_file['matched_tt_scores01'][:] #Zixin: update to scores01
-        # Sht_tot1 = h5_file['matched_tt_ht'][:]
-        # S_npvs1 = h5_file['matched_tt_npvs'][:]
-        # S_njets1 = h5_file['matched_tt_njets'][:]
+def save_subplot(fig, ax, filename, pad=0.3):
+    fig.canvas.draw()
+    bbox = ax.get_tightbbox(fig.canvas.get_renderer())
+    bbox = bbox.transformed(fig.dpi_scale_trans.inverted())
+    bbox = mtransforms.Bbox.from_extents(bbox.x0-pad, bbox.y0-pad, bbox.x1+pad, bbox.y1+pad)
+    fig.savefig(filename, bbox_inches=bbox)
 
-        # # Sas01_tot2 = h5_file['matched_aa_scores'][:] #Giovanna: original
-        # Sas01_tot2 = h5_file['matched_aa_scores01'][:] #Zixin: update to scores01
-        # Sht_tot2 = h5_file['matched_aa_ht'][:]
-        # S_npvs2 = h5_file['matched_aa_npvs'][:]
-        # S_njets2 = h5_file['matched_aa_njets'][:]
-    with h5py.File(path, "r") as f:
-        D = {
-            # background
-            "matched_bkg_score01": f["data_scores01"][:],
-            "matched_bkg_ht":      f["data_ht"][:],
-            "matched_bkg_Npv":     f["data_Npv"][:],
-            "matched_bkg_njets":   f["data_njets"][:],
-            # signal 1 (tt)
-            "matched_tt_score01":  f["matched_tt_scores01"][:],
-            "matched_tt_ht":       f["matched_tt_ht"][:],
-            "matched_tt_Npv":      f["matched_tt_npvs"][:],
-            "matched_tt_njets":    f["matched_tt_njets"][:],
-            # signal 2 (aa)
-            "matched_aa_score01":  f["matched_aa_scores01"][:],
-            "matched_aa_ht":       f["matched_aa_ht"][:],
-            "matched_aa_Npv":      f["matched_aa_npvs"][:],
-            "matched_aa_njets":    f["matched_aa_njets"][:],
-        }
-    return D
+
+def rate_efficiency_panels(time, R, Rht, Ras, Id1_R, GE, Eht, Eas, Id1_GE, out_pdf, out_a, out_b, case_label="Case 1", bkg = "MC"):
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+
+    # Background
+    axes[0].plot(time, R,   label="Total Rate", color='navy', linewidth=2, marker='o')
+    axes[0].plot(time, Rht, label="HT Rate",    color='cyan', linewidth=1, marker='o')
+    axes[0].plot(time, Ras, label="AD Rate",    color='deepskyblue', linewidth=1, marker='o')
+    axes[0].plot(time, Id1_R, linestyle="dashed", color='dodgerblue', linewidth=2, label="Total Ideal Rate")
+    axes[0].axhline(y=110, color='grey', linestyle='--', linewidth=1.5)
+    axes[0].axhline(y=90,  color='grey', linestyle='--', linewidth=1.5)
+    axes[0].set_xlabel('Time (Fraction of Run)', labelpad=10, loc='center'); axes[0].set_ylabel('Average Background Rate (kHz)', labelpad=10, loc='center')
+    axes[0].set_xlim(0,1); axes[0].set_ylim(0,270); axes[0].legend(title=case_label); axes[0].grid(True)
+    # axes[0].set_ylim(40, 270)
+
+    # Signal
+    axes[1].plot(time, GE,  label="Total Cumulative Signal Efficiency", color='mediumvioletred', linewidth=2, marker='o')
+    axes[1].plot(time, Eht, label="HT Signal Efficiency", color='mediumpurple', linewidth=1, marker='o')
+    axes[1].plot(time, Eas, label="AD Signal Efficiency", color='orchid', linewidth=1, marker='o')
+    axes[1].plot(time, Id1_GE, linestyle="dashed", color='black', linewidth=2, label="Total Ideal Cumulative Signal Efficiency")
+    axes[1].set_xlabel('Time (Fraction of Run)', labelpad=10, loc='center'); axes[1].set_ylabel('Average Efficiency (%)', labelpad=10, loc='center')
+    axes[1].set_xlim(0,1)
+    if bkg == "MC":
+        axes[1].set_ylim(60,90); axes[1].legend(title=case_label, loc='upper left'); axes[1].grid(True)
+    else:
+        print('Real Data setting')
+        axes[1].set_ylim(40, 70)
+
+        axes[1].xaxis.set_major_locator(MaxNLocator(nbins=6, prune='both'))
+        axes[1].yaxis.set_major_locator(MaxNLocator(nbins=6, prune='both'))
+        axes[1].set_yticks(np.arange(35, 70, 5))
+        axes[1].tick_params(axis='both')
+        yticks1 = axes[1].get_yticks()
+        axes[1].set_yticks(yticks1[1:])
+        axes[1].legend(title=case_label, fontsize=15,
+               loc='best', frameon=True, handlelength=2.5,
+               handletextpad=0.5, borderpad=0.8)
+        axes[1].grid(True)
+
+
+
+
+    plt.tight_layout(); fig.savefig(out_pdf)
+    
+    save_subplot(fig, axes[0], out_a, pad=0.3); save_subplot(fig, axes[1], out_b, pad=0.3)
+    plt.close(fig)
+
+    print("Saved the figures!")
+
+
+def multi_path_panels(time, Id1_R, Id1_r_bht, Id1_r_bas,
+    Id1_r1_s, Id1_r2_s, Id1_r1_sht, Id1_r1_sas,
+    Id1_r2_sht, Id1_r2_sas, Id1_E, Id1_GE,
+    out_pdf="outputs/demo_IdealMultiTrigger/multi_path_plots(case1).pdf",case='Case1'):
+    
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+
+    # (0,0) background
+    axes[0,0].plot(time, Id1_R,      label="Total Ideal Rate", color='tab:blue')
+    axes[0,0].plot(time, Id1_r_bht,  label="HT Ideal Rate",    linestyle='--', color='cyan')
+    axes[0,0].plot(time, Id1_r_bas,  label="AD Ideal Rate",    linestyle='-.', color='mediumblue')
+    axes[0,0].set_xlabel('Time (Fraction of Run)'); axes[0,0].set_ylabel('Background Rate (kHz)')
+    axes[0,0].set_xlim(0,1); axes[0,0].set_ylim(0,200); axes[0,0].legend(title=f"{case}"); axes[0,0].grid(True)
+
+    # (1,1) ttbar efficiency
+    axes[1,1].plot(time, Id1_r1_s,    label="Total",     color='tab:orange')
+    axes[1,1].plot(time, Id1_r1_sht,  label="from HT",   linestyle='--', color='gold')
+    axes[1,1].plot(time, Id1_r1_sas,  label="from AD",   linestyle='-.', color='goldenrod')
+    axes[1,1].set_xlabel('Time (Fraction of Run)'); axes[1,1].set_ylabel('TTbar Efficiency (%)')
+    axes[1,1].set_xlim(0,1); axes[1,1].legend(title=f"{case}"); axes[1,1].grid(True)
+
+    # (1,0) HToAATo4B efficiency
+    axes[1,0].plot(time, Id1_r2_s,    label="Total",     color='tab:green')
+    axes[1,0].plot(time, Id1_r2_sht,  label="from HT",   linestyle='--', color='lime')
+    axes[1,0].plot(time, Id1_r2_sas,  label="from AD",   linestyle='-.', color='darkgreen')
+    axes[1,0].set_xlabel('Time (Fraction of Run)'); axes[1,0].set_ylabel('HToAATo4B Efficiency (%)')
+    axes[1,0].set_xlim(0,1); axes[1,0].legend(title=f"{case}"); axes[1,0].grid(True)
+
+    # (0,1) total signal eff
+    axes[0,1].plot(time, Id1_E,  label="Total",            linestyle='--', color='purple')
+    axes[0,1].plot(time, Id1_GE, label="Cumulative Total",               color='purple')
+    axes[0,1].set_xlabel('Time (Fraction of Run)'); axes[0,1].set_ylabel('Combined Signal Efficiency (%)')
+    axes[0,1].set_xlim(0,1); axes[0,1].legend(title=f"{case}"); axes[0,1].grid(True)
+
+    plt.tight_layout()
+    fig.savefig(out_pdf)
+    return fig, axes

@@ -1,0 +1,3 @@
+# dim  AA_pass  TT_pass  AA_Ex_pass  TT_Ex_pass  AA_ht_pass  TT_ht_pass
+  1    12.330    87.510     1.655     2.609    11.602    86.539
+  2    13.345    85.441     3.129     3.343    11.602    86.539

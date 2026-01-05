@@ -135,13 +135,13 @@ python3 -m SampleProcessing.ae.experiment_testae --dims=2
 python3 -m SampleProcessing.ae.experiment_testae --dims=2 --bkgType=RealData
 ```
 
-## Step 2 Building Trigger_food_MC
-### Building Trigger_food_MC.h5 (building Monte Carlo Samples and store it under Data folder)
-# use simulated events as background
+## Step 2 Building Trigger_food
+### Building Trigger_food_MC.h5 or Trigger_food_Data.h5 under Data Folder
+#### use simulated events as background
 ```
 python3 -m SampleProcessing.derived_info.build_trigger_food
 ```
-# use real experiment events as background
+#### use real experiment events as background
 ```
 python3 -m SampleProcessing.derived_info.build_trigger_food --bkgType=RealData
 ```
@@ -149,36 +149,52 @@ python3 -m SampleProcessing.derived_info.build_trigger_food --bkgType=RealData
 ## Step 3 Choose different agents for Trigger Control (Control-only framework)
 
 ### Single-path demo (PD controller on HT & AD)
-## use --bkgType=MC or RealData (default=MC)
+#### use --bkgType=MC or RealData (default=MC)
 ```
 python3 -m Control.mc_singletrigger --bkgType=RealData
 python3 -m Control.mc_singletrigger_plots --bkgType=RealData
 ```
 ### Multi Trigger Control Framework Case 1/2/3
+#### Running CompCost_Eval reports reference cost parameters for Case 3 
+### (default: MC)
 ```
-python3 -m Control.mc_multipath --agent v1
-python3 -m Control.mc_multipath --agent v2
-python3 -m Control.mc_multipath --agent v3
-```
-### A Simple Local Controller Case 1/2/3
-```
-python3 -m Control.mc_localmulti --agent v1 \                   
-    --path Data/Trigger_food_MC.h5 \
-    --outdir outputs/case1
+python3 -m Control.IdealMultiTrigger --agent v1 --bkgType=MC --path "Data/Trigger_food_MC.h5" \
+--outdir "outputs/demo_IdealMultiTrigger_mc"
 
-python3 -m Control.mc_localmulti --agent v2 \                   
-    --path Data/Trigger_food_MC.h5 \
-    --outdir outputs/case2
-python3 -m Control.mc_localmulti --agent v3 \                   
-    --path Data/Trigger_food_MC.h5 \
-    --outdir outputs/case3
+python3 -m Control.IdealMultiTrigger --agent v2
+
+python3 -m Control.CompCost_Eval --bkgType=MC  --path Data/Trigger_food_MC.h5
+python3 -m Control.IdealMultiTrigger --agent v3 --costRef 5.6 2.7 --forceCostRef
+```
+
+
+### A Real Controller Case 1/2/3 (default: MC)
+```
+python3 -m Control.RealMultiTrigger --agent v1 \
+    --bkgType RealData \
+    --path Data/Trigger_food_Data.h5 \
+    --outdir outputs/demo_RealMultiTrigger_realdata
+
+python3 -m Control.RealMultiTrigger --agent v2 \
+    --bkgType RealData \
+    --path Data/Trigger_food_Data.h5 \
+    --outdir outputs/demo_RealMultiTrigger_realdata
+
+python3 -m Control.RealMultiTrigger --agent v3 \
+    --bkgType RealData \
+    --path Data/Trigger_food_Data.h5 \
+    --outdir outputs/demo_RealMultiTrigger_realdata
 ```
 
 ## Step 4 Generate Summary Plots
-### Summary of different agents’ performance on simulation samples with autoencoder dimension = 1/4.
+### Summary of different agents’ Performance (default:MC)
 
 ```
-python3 -m Control.summary --dim=4
-python3 -m Control.summary --dim=1
+python3 -m Control.summary --bkgType=MC --path Data/Trigger_food_MC.h5 \
+--out outputs/SummaryPanels_MC.pdf
+
+python3 -m Control.summary --bkgType=RealData --path Data/Trigger_food_Data.h5 \
+--out outputs/SummaryPanels_Data.pdf
+
 ```
 

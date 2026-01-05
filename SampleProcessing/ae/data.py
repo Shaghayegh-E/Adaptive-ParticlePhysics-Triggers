@@ -353,7 +353,7 @@ def process_h5_file_MC(input_filename):
         _sort_by_pt_desc_inplace(sorted_data_array)
         # Add npvsGood_smr1 values to the last column (time column)
         #sorted_data_array[:, :, 3] = npvsGood_smr1_values[:, np.newaxis]
-  
+
         
         zero_pt_mask = sorted_data_array[:, :, 2] == 0  # Identify where pt == 0
         sorted_data_array[:, :, 0][zero_pt_mask] = -1   # Set eta to -1 where pt == 0

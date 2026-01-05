@@ -11,8 +11,8 @@ from sklearn.model_selection import train_test_split
 import tensorflow as tf
 from tensorflow import keras
 import os
-from .data import process_h5_file_Data, process_h5_file_MC, load_bkg_aa_tt #new readin H5 file functions V2
-from .models import build_autoencoder_data # the new AE model with RELU V2
+from .data import load_bkg_aa_tt #new readin H5 files
+from .models import build_autoencoder_data # the AE model with RELU
 from .losses import masked_mse_loss  # mse loss
 from ..derived_info.scoring import (
     batch_mse_scores,
@@ -21,7 +21,7 @@ from ..derived_info.scoring import (
     # specified threshold. Here is the definition of the function:
     pass_rate_above,
 )
-from .plots import plot_signal_pass_vs_dim, plot_hist_pair, plot_hist_for_dim
+from .plots import plot_signal_pass_vs_dim, plot_hist_for_dim
 from pathlib import Path
 import mplhep as hep
 hep.style.use("CMS")
@@ -68,9 +68,9 @@ def train_one_dim(X_train, X_val, img_shape, code_dim, loss_name="mse", lr = 2e-
     ae = keras.Model(inp, out)
 
     loss = loss_name if loss_name != "masked" else masked_mse_loss
-    opt = keras.optimizers.Adam(learning_rate=lr)
-    ae.compile(optimizer=opt, loss=loss)
-    # ae.compile(optimizer="adamax", loss=loss)
+    #opt = keras.optimizers.Adam(learning_rate=lr)
+    #ae.compile(optimizer=opt, loss=loss)
+    ae.compile(optimizer="adamax", loss=loss)
 
     es = keras.callbacks.EarlyStopping(
         monitor="val_loss",
@@ -130,7 +130,7 @@ def run_experiment(args):
     #  - RealData: HT baseline is percentile of HT_test 
     #  - MC:       HT baseline is percentile of HT_bkg full 
     X_tr, X_te, HT_tr, HT_te = train_test_split(
-        X_bkg, HT_bkg, test_size=0.2, random_state=40
+        X_bkg, HT_bkg, test_size=0.2, random_state=40, shuffle=True
     )
 
     img_shape = X_tr.shape[1:]  # (25,)
@@ -145,8 +145,17 @@ def run_experiment(args):
     print("TT_HTPath_passed:", TT_ht_pass)
 
     # ---- AE sweep over dims (default [2]) ----
-    results_dim = {}
     aa_rates, tt_rates = [], []
+    aa_ex_rates, tt_ex_rates = [], []
+    
+    base, _ = os.path.splitext(args.out_pass_vs_dim)
+    outfile = f"{base}_summary.txt"
+    
+    with open(outfile, "w") as f:
+        f.write(
+            "# dim  AA_pass  TT_pass  AA_Ex_pass  TT_Ex_pass  AA_ht_pass  TT_ht_pass\n"
+        )
+        
 
     for d in args.dims:
         print(f"\n=== Training ReLU autoencoder dim={d} (bkgType={args.bkgType}) ===")
@@ -168,14 +177,40 @@ def run_experiment(args):
         aa_pass = pass_rate_above(aa_scores, thr)
         tt_pass = pass_rate_above(tt_scores, thr)
 
-        results_dim[d] = dict(bkg_scores=bkg_scores, AA_scores=aa_scores, TT_scores=tt_scores)
+        
         aa_rates.append(aa_pass)
         tt_rates.append(tt_pass)
+        aa_Ex_pass = 100 * np.mean((aa_scores > thr)& ~(HT_AA > thr_ht))
+        tt_Ex_pass = 100 * np.mean((tt_scores > thr)& ~(HT_TT > thr_ht))
+        
+
+        with open(outfile, "a") as f:
+            f.write(
+                f"{d:3d}  "
+                f"{aa_pass:8.3f}  {tt_pass:8.3f}  "
+                f"{aa_Ex_pass:8.3f}  {tt_Ex_pass:8.3f}  "
+                f"{AA_ht_pass:8.3f}  {TT_ht_pass:8.3f}\n"
+            )
+
+        aa_ex_rates.append(aa_Ex_pass)
+        tt_ex_rates.append(tt_Ex_pass)
 
         print(f"dim={d:2d}  thr={thr:.4g}  AA={aa_pass:6.2f}%  TT={tt_pass:6.2f}%")
+        
+        # ---- Hist AD scores ----
+        if d in args.save_model_dims:
+            plot_hist_for_dim(
+            d=d,
+            bkg_scores=bkg_scores,
+            tt_scores = tt_scores,
+            aa_scores=aa_scores,
+            thr=thr,
+            outbase=args.out_hist,
+            title_suffix=""
+            )
 
     # ---- Efficiency vs dim plot ----
-    #base, _ = os.path.splitext(args.out_pass_vs_dim)
+    
     
     plot_signal_pass_vs_dim(
             args.dims,
@@ -183,21 +218,21 @@ def run_experiment(args):
             tt_rates,
             AA_ht_pass,
             TT_ht_pass,
-            args.out_pass_vs_dim
+            args.out_pass_vs_dim,
+            is_exclusive=False
+        )
+    plot_signal_pass_vs_dim(
+            args.dims,
+            aa_ex_rates,
+            tt_ex_rates,
+            AA_ht_pass,
+            TT_ht_pass,
+            f"{base}_ex.pdf",
+            is_exclusive=True
         )
 
-    # ---- Hist AD scores ----
-    if len(args.dims) == 1:
-        d1 = args.dims[0]
-        plot_hist_for_dim(
-        d=d1,
-        bkg_scores=bkg_scores,
-        tt_scores = tt_scores,
-        aa_scores=aa_scores,
-        thr=thr,
-        outbase=args.out_hist_pair,
-        title_suffix=""
-        )
+    
+    '''
     else:
         d1 = args.dims[0]
         d2 = 4 if 4 in results_dim else args.dims[min(1, len(args.dims) - 1)]
@@ -211,7 +246,7 @@ def run_experiment(args):
             out_a=args.out_hist_a,
             out_b=args.out_hist_b,
         )
-
+    '''
 
 def main():
     ap = argparse.ArgumentParser(description="Autoencoder test experiment (ReLU AE + new H5 readers)")
@@ -237,7 +272,7 @@ def main():
     ap.add_argument("--loss", choices=["mse", "masked"], default="mse")
 
     ap.add_argument("--out_pass_vs_dim", default="outputs/autoencoders/signal_pass_vs_dimension.pdf")
-    ap.add_argument("--out_hist_pair",   default="outputs/autoencoders/AD_hist_2016.pdf")
+    ap.add_argument("--out_hist",   default="outputs/autoencoders/AD_hist_2016.pdf")
     ap.add_argument("--out_hist_a",      default="outputs/autoencoders/AD_hist_2016-a.pdf")
     ap.add_argument("--out_hist_b",      default="outputs/autoencoders/AD_hist_2016-b.pdf")
 
@@ -251,13 +286,13 @@ def main():
     args = ap.parse_args()
     mode_tag = "realdata" if args.bkgType == "RealData" else "mc"
     args.out_pass_vs_dim = add_mode_suffix(args.out_pass_vs_dim, mode_tag)
-    args.out_hist_pair   = add_mode_suffix(args.out_hist_pair, mode_tag)
+    args.out_hist   = add_mode_suffix(args.out_hist, mode_tag)
     args.out_hist_a      = add_mode_suffix(args.out_hist_a, mode_tag)
     args.out_hist_b      = add_mode_suffix(args.out_hist_b, mode_tag)
 
     # Make sure output dirs exist
     ensure_parent_dir(args.out_pass_vs_dim)
-    ensure_parent_dir(args.out_hist_pair)
+    ensure_parent_dir(args.out_hist)
     ensure_parent_dir(args.out_hist_a)
     ensure_parent_dir(args.out_hist_b)
 

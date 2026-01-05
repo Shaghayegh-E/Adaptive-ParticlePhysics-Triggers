@@ -65,7 +65,7 @@ def save_pdf_png(fig, outbase: Path, dpi=250):
 #     plt.legend(loc='best', frameon=True)
 #     plt.tight_layout(); plt.savefig(out_path); plt.close()
 
-def plot_signal_pass_vs_dim(dims, aa_rates, tt_rates, aa_ht_eff, tt_ht_eff, out_path):
+def plot_signal_pass_vs_dim(dims, aa_rates, tt_rates, aa_ht_eff, tt_ht_eff, out_path, is_exclusive=False):
     
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     
@@ -78,11 +78,15 @@ def plot_signal_pass_vs_dim(dims, aa_rates, tt_rates, aa_ht_eff, tt_ht_eff, out_
     plt.plot(x, tt_rates, marker="o", label="TTbar (AD)",color="goldenrod")
 
     # HT baselines as horizontal dashed lines
-    plt.axhline(aa_ht_eff, linestyle="--", label=f"HToAATo4B (HT): {aa_ht_eff:.2f}%",color='grey')
-    plt.axhline(tt_ht_eff, linestyle="--", label=f"TTbar (HT): {tt_ht_eff:.2f}%",color='grey')
-
+    if is_exclusive:
+        plt.ylabel("Exclusive Efficiency (%)")
+    else:
+        
+        plt.axhline(aa_ht_eff, linestyle="--", label=f"HToAATo4B (HT): {aa_ht_eff:.2f}%",color='grey')
+        plt.axhline(tt_ht_eff, linestyle="--", label=f"TTbar (HT): {tt_ht_eff:.2f}%",color='grey')
+        plt.ylabel("Efficiency (%)")
+        
     plt.xlabel("Latent Dimension")
-    plt.ylabel("Efficiency (%)")
     plt.grid(True, alpha=0.3)
 
     # Nice ticks for powers of 2
