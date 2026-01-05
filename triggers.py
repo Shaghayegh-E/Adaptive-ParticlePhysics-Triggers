@@ -8,6 +8,8 @@ def Sing_Trigger(values: Iterable[float], ht_cut: float) -> float:
 
     This mirrors the original behavior: returns percentage of events with
     value >= cut.
+    
+    Return 0-100
     """
     arr = np.asarray(values)
     if arr.size == 0:

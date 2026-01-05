@@ -816,3 +816,63 @@ def style_diag_legend(ax, title=None, loc="best"):
 def finalize_diag_fig(fig, top=0.86):
     fig.tight_layout()
     fig.subplots_adjust(top=top)
+
+
+
+
+
+
+def plot_inband_eff_single_signal_ad_vs_ht(
+    summ_ad, summ_ht, *, signal_key, signal_label, outpath, run_label,
+    ymin=None, ymax_pad=2.0, GFPO=True
+):
+    """
+    Create one plot per signal:
+      x-axis: triggers {AD, HT}
+      bars: methods {Constant, PID, DQN, GRPO}
+      y: mean in-band efficiency for `signal_key` in summarize_paper_table outputs
+    """
+    triggers = ["AD", "HT"]
+    trigger_titles = {"AD": "AD Trigger", "HT": "HT Trigger"}
+    if not GFPO:
+        methods = ["Constant", "PID", "DQN", "GRPO"]
+    else:
+        methods = ["Constant", "PID", "DQN", "GRPO", "GFPO"]
+
+
+    # Build values: shape (T, M)
+    vals = np.zeros((2, len(methods)), dtype=np.float64)
+    for ti, tr in enumerate(triggers):
+        summ = summ_ad if tr == "AD" else summ_ht
+        for mi, m in enumerate(methods):
+            vals[ti, mi] = float(summ[m][signal_key])
+
+    x = np.arange(len(triggers))
+    bw = 0.80 / max(1, len(methods))
+
+    fig, ax = plt.subplots(figsize=(8.8, 5.2))
+    for mi, m in enumerate(methods):
+        ax.bar(x - 0.40 + (mi + 0.5) * bw, vals[:, mi], width=bw, label=m)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([trigger_titles[t] for t in triggers])
+    ax.set_ylabel(f"In-band efficiency ({signal_label}) [%]")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.5)
+
+    # y-limits: force lower start as requested
+    finite = vals[np.isfinite(vals)]
+    if finite.size:
+        y_top = float(np.max(finite) + float(ymax_pad))
+    else:
+        y_top = None
+
+    if ymin is not None and y_top is not None:
+        ax.set_ylim(float(ymin), y_top)
+    elif ymin is not None:
+        ax.set_ylim(float(ymin), ax.get_ylim()[1])
+
+    ax.legend(loc="best", frameon=True, title="Method")
+    add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
+    save_png(fig, str(outpath))
+    plt.close(fig)

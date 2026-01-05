@@ -17,7 +17,7 @@ We map:
   - time step t <-> micro-step within chunk (stride over events)
 
 We provide two reward options:
-  --reward-mode lhc   : use your existing compute_reward(...) (rate tracking + signal bonus + step penalty)
+  --reward-mode lhc   : use the existing compute_reward(...) (rate tracking + signal bonus + step penalty)
   --reward-mode paper : use ADT paper-style reward r = α*(TP - FP - FN) + β*TN (computed from current micro-step)
                         (we normalize by counts to keep magnitude stable)
 
@@ -56,7 +56,7 @@ from RL.utils import (
     save_png, print_h5_tree, read_any_h5, set_paper_style,
     style_diag_axes, style_diag_legend, finalize_diag_fig,
 )
-from RL.dqn_agent import SeqDQNAgent, DQNConfig, make_event_seq_ht, make_event_seq_as, shield_delta, compute_reward
+from RL.dqn_agent import SeqDQNAgent, DQNConfig, make_event_seq_ht_v0, make_event_seq_as_v0, shield_delta, compute_reward
 
 # ------------------------- Fixing seed for reproducibility -------------------------
 SEED = 20251213
@@ -157,21 +157,25 @@ def summarize_table_metrics(r_pct, s_tt, s_aa, cut_hist, target_pct, tol_pct):
     s_aa  = np.asarray(s_aa,  dtype=np.float64)
     cut   = np.asarray(cut_hist, dtype=np.float64)
 
-    # Align lengths safely (important if something early-breaks)
+    # Align lengths safely 
     r_pct, s_tt, s_aa, cut = _truncate_to_min_len(r_pct, s_tt, s_aa, cut)
 
     err = r_pct - float(target_pct)
     abs_err = np.abs(err)
     inband = abs_err <= float(tol_pct)
 
+    upper = float(target_pct) + float(tol_pct)
+    lower = float(target_pct) - float(tol_pct)
+
     out = {}
     out["MAE"]      = float(np.mean(abs_err)) if abs_err.size else np.nan
     out["P95"]      = float(np.percentile(abs_err, 95)) if abs_err.size else np.nan
     out["InBand"]   = float(np.mean(inband)) if inband.size else np.nan
-    out["UpViol"]   = float(np.mean(r_pct > (float(target_pct) + float(tol_pct)))) if r_pct.size else np.nan
+    out["UpFrac"]   = float(np.mean(r_pct > upper)) if r_pct.size else np.nan
+    out["DownFrac"] = float(np.mean(r_pct < lower)) if r_pct.size else np.nan
+
 
     dc = np.diff(cut) if cut.size >= 2 else np.array([], dtype=np.float64)
-    out["TV"] = float(np.sum(np.abs(dc))) if dc.size else 0.0
 
     def safe_mean(x, m):
         return float(np.mean(x[m])) if np.any(m) else np.nan
@@ -204,7 +208,7 @@ def write_adt_table(rows, tex_path, caption, label):
     lines.append(r"\renewcommand{\arraystretch}{1.08}")
     lines.append(r"\begin{tabular}{llrrrrrrr}")
     lines.append(r"\hline")
-    lines.append(r"Trigger & Method & MAE$\downarrow$ & P95$|e|\,\downarrow$ & InBand$\uparrow$ & UpViol$\downarrow$ & TV$\downarrow$ & $\bar{t}\bar{t}\uparrow$ & $h\to4b\uparrow$ \\")
+    lines.append(r"Trigger & Method & MAE$\downarrow$ & P95$|e|\,\downarrow$ & InBand$\uparrow$ & UpViol$\downarrow$ & UpFrac$\downarrow$ & DownFrac$\downarrow$ & $\bar{t}\bar{t}\uparrow$ & $h\to4b\uparrow$ \\")
     lines.append(r"\hline")
 
     def emit_block(block_title, trig_key):
@@ -214,8 +218,8 @@ def write_adt_table(rows, tex_path, caption, label):
                 continue
             lines.append(
                 f"{fmt(r['Trigger'])} & {fmt(r['Method'])} & "
-                f"{fmt(r['MAE'])} & {fmt(r['P95'])} & {fmt(r['InBand'])} & {fmt(r['UpViol'])} & "
-                f"{fmt(r['TV'])} & {fmt(r['ttbar'])} & {fmt(r['h4b'])} \\\\"
+                f"{fmt(r['MAE'])} & {fmt(r['P95'])} & {fmt(r['InBand'])} & {fmt(r['UpFrac'])} & "
+                f"{fmt(r['DownFrac'])} & {fmt(r['ttbar'])} & {fmt(r['h4b'])} \\\\"
             )
         lines.append(r"\hline")
 
@@ -458,7 +462,7 @@ def main():
             if prev_bg_ht_adt is None:
                 prev_bg_ht_adt = bg_before_ht
 
-            obs_ht = make_event_seq_ht(
+            obs_ht = make_event_seq_ht_v0(
                 bht=bht_w, bnpv=bnpv_w,
                 bg_rate=bg_before_ht,
                 prev_bg_rate=prev_bg_ht_adt,
@@ -489,7 +493,7 @@ def main():
             tt_after_ht = Sing_Trigger(sht_tt_j, Ht_cut_next)
             aa_after_ht = Sing_Trigger(sht_aa_j, Ht_cut_next)
 
-            obs_ht_next = make_event_seq_ht(
+            obs_ht_next = make_event_seq_ht_v0(
                 bht=bht_w, bnpv=bnpv_w,
                 bg_rate=bg_after_ht,
                 prev_bg_rate=bg_before_ht,
@@ -534,7 +538,7 @@ def main():
             if prev_bg_as_adt is None:
                 prev_bg_as_adt = bg_before_as
 
-            obs_as = make_event_seq_as(
+            obs_as = make_event_seq_as_v0(
                 bas=bas_w, bnpv=bnpv_w,
                 bg_rate=bg_before_as,
                 prev_bg_rate=prev_bg_as_adt,
@@ -563,7 +567,7 @@ def main():
             tt_after_as = Sing_Trigger(sas_tt_j, AS_cut_next)
             aa_after_as = Sing_Trigger(sas_aa_j, AS_cut_next)
 
-            obs_as_next = make_event_seq_as(
+            obs_as_next = make_event_seq_as_v0(
                 bas=bas_w, bnpv=bnpv_w,
                 bg_rate=bg_after_as,
                 prev_bg_rate=bg_before_as,
@@ -753,7 +757,7 @@ def main():
     import csv
     csv_path = tables_dir / "adt_summary.csv"
     with open(csv_path, "w", newline="") as f:
-        fieldnames = ["Trigger","Method","MAE","P95","InBand","UpViol","TV","ttbar","h4b"]
+        fieldnames = ["Trigger","Method","MAE","P95","InBand","UpFrac","DownFrac","ttbar","h4b"]
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         for r in rows:
@@ -762,12 +766,12 @@ def main():
     # LaTeX
     tex_path = tables_dir / "adt_summary.tex"
     caption = (
-        f"ADT baseline summary. Rates evaluated in percent units with target $r^*={target_pct:.3g}\\%$ "
-        f"and tolerance $\\pm{tol_pct:.3g}\\%$. "
-        "MAE and P95$|e|$ summarize typical and tail absolute rate errors; "
-        "InBand and UpViol are fractions of chunks within band and above the upper tolerance. "
-        "TV is the total variation of the threshold trajectory. "
-        "$\\bar{t}\\bar{t}$ and $h\\to4b$ report mean signal efficiencies restricted to in-band chunks."
+    f"ADT baseline summary. Rates evaluated in percent units with target $r^*={target_pct:.3g}\\%$ "
+    f"and tolerance $\\pm{tol_pct:.3g}\\%$. "
+    "MAE and P95$|e|$ summarize typical and tail absolute rate errors; "
+    "InBand, UpFrac, and DownFrac are fractions of chunks within band, above the upper tolerance, "
+    "and below the lower tolerance. "
+    "$\\bar{t}\\bar{t}$ and $h\\to4b$ report mean signal efficiencies restricted to in-band chunks."
     )
     write_adt_table(rows, tex_path, caption=caption, label="tab:adt_summary")
 

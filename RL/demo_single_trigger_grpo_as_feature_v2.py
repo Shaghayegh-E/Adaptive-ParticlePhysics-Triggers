@@ -2,27 +2,28 @@
 """
 demo_single_trigger_grpo_as_feature_v2.py
 
-Single-trigger threshold control with event-sequence features.
+Single-trigger threshold control with event-sequence features. 
+This is sliding window.
 
 Main focus: AD/AS trigger control (AS_cut) comparing:
   - Constant menu threshold (fixed from calibration window)
   - PD baseline (uses PD_controller2 for AS)
   - DQN baseline (sequence DQN; epsilon-greedy)
-  - GRPO (bandit-style group sampling + policy update)
+  - GFPO (bandit-style group sampling + filter + policy update)
 
 Optional: also run the HT trigger control (Ht_cut) when --run-ht is set:
   - PD baseline for HT uses PD_controller1 for HT specifically
   - DQN baseline (sequence DQN)
-  - GRPO (bandit-style)
+  - GFPO (bandit-style + filter) 
 
 Create summary table for paper:
 1) Compact summary table (CSV + LaTeX) with:
    - InBand (↑), MAE (↓), P95|e| (↓), ViolMag (↓), StepRMS (↓),
      TT_inband (↑), AA_inband (↑), Mix80_20 (↑)
-2) CDF of |rate error| (kHz) for PD vs GRPO
-3) Running in-band fraction vs time (PD vs GRPO)
-4) Cut-step magnitude histogram |Δcut| (PD vs GRPO)
-5) In-band efficiency bars (PD vs GRPO)
+2) CDF of |rate error| (kHz) for PD vs GFPO
+3) Running in-band fraction vs time (PD vs GFPO)
+4) Cut-step magnitude histogram |Δcut| (PD vs GFPO)
+5) In-band efficiency bars (PD vs GFPO)
 
 Notes:
 - Rates are in *percent units* from Sing_Trigger: target r* = 0.25 (%).
@@ -43,7 +44,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from controllers import PD_controller1, PD_controller2
 from triggers import Sing_Trigger
-from RL.utils import add_cms_header, save_png, print_h5_tree, read_any_h5, cummean, rel_to_t0, near_occupancy, style_diag_axes, style_diag_legend, finalize_diag_fig, apply_paper_style
+from RL.utils import add_cms_header, save_png, print_h5_tree, read_any_h5, cummean, rel_to_t0, near_occupancy, style_diag_axes, style_diag_legend, finalize_diag_fig, apply_paper_style, plot_inband_eff_single_signal_ad_vs_ht
 from RL.grpo_agent import GRPOAgent, GRPOConfig, GRPORewardCfg #GRPO agent
 from RL.dqn_agent import SeqDQNAgent, DQNConfig  # DQN agent
 from RL.dqn_agent import make_event_seq_as, make_event_seq_ht, shield_delta
@@ -57,10 +58,8 @@ RATE_SCALE_KHZ = 400.0
 import mplhep as hep
 hep.style.use("CMS")
 
-from RL.utils import apply_paper_style
 apply_paper_style()
 
-@dataclass
 class RollingWindow:
     def __init__(self, max_events: int):
         self.max_events = int(max_events)
@@ -78,7 +77,6 @@ class RollingWindow:
         )
 
 # This is for HT
-@dataclass
 class RollingWindowHT:
     def __init__(self, max_events: int):
         self.max_events = int(max_events)
@@ -97,6 +95,60 @@ class RollingWindowHT:
 
 
 # ----------------------------- metrics helpers -----------------------------
+def running_mean(x, w=7):
+    x = np.asarray(x, dtype=np.float64)
+    if x.size == 0:
+        return x
+    w = max(1, int(w))
+    k = np.ones(w, dtype=np.float64)
+    return np.convolve(x, k, mode="same") / np.convolve(np.ones_like(x), k, mode="same")
+
+def plot_running_occ_multi(time, occ_by_method, w, title, outpath, run_label):
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    for name, occ in occ_by_method.items():
+        ax.plot(time, running_mean(occ, w=int(w)), linewidth=2.2, label=f"{name} (w={int(w)})")
+
+    ax.set_xlabel("Time (Fraction of Run)")
+    ax.set_ylabel("Near-cut occupancy (fraction of events)")
+    ax.set_ylim(0.0, 1.05)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True, title=title)
+    add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
+    save_png(fig, str(outpath))
+    plt.close(fig)
+
+def plot_occ_hist_multi(occ_by_method, title, outpath, run_label, bins=40):
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    for name, occ in occ_by_method.items():
+        occ = np.asarray(occ, dtype=np.float64)
+        occ = occ[np.isfinite(occ)]
+        if occ.size:
+            ax.hist(occ, bins=int(bins), alpha=0.45, density=True, label=name)
+
+    ax.set_xlabel("Near-cut occupancy")
+    ax.set_ylabel("Density")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.legend(loc="best", frameon=True, title=title)
+    add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
+    save_png(fig, str(outpath))
+    plt.close(fig)
+
+def update_err_i(err_i, bg_rate, target, lam=0.95):
+    e = (float(bg_rate) - float(target)) / max(float(target), 1e-6)
+    return float(lam) * float(err_i) + (1.0 - float(lam)) * float(e)
+
+
+def d_bg_d_cut_norm(scores, cut, step, target):
+    # normalized derivative: (d bg_rate / d cut) / target
+    step = float(step)
+    if step <= 0:
+        return 0.0
+    p_plus  = float(Sing_Trigger(scores, float(cut) + step))
+    p_minus = float(Sing_Trigger(scores, float(cut) - step))
+    dp_dcut = (p_plus - p_minus) / (2.0 * step)  # typically negative
+    return float(dp_dcut) / max(float(target), 1e-6)
 def _group_advantages_from_grpo_samples(grpo_samples, *, trigger="AS", baseline="mean", eps=1e-8):
     """
     Reconstruct GRPO advantages from logged candidate rewards.
@@ -106,7 +158,7 @@ def _group_advantages_from_grpo_samples(grpo_samples, *, trigger="AS", baseline=
       adv_norm_all:  list of (r - baseline) / std
       adv_raw_exec:  list of executed (r_exec - baseline_of_candidates)
       adv_norm_exec: list of executed (r_exec - baseline) / std
-      frac_vanish:   fraction of groups with std ~ 0 (vanishing-adv groups)
+      frac_vanish:   fraction of groups with std ~ 0 (vanishing advantage groups)
     """
     # Filter rows for this trigger
     rows = [r for r in grpo_samples if r.get("trigger") == trigger]
@@ -117,13 +169,13 @@ def _group_advantages_from_grpo_samples(grpo_samples, *, trigger="AS", baseline=
     for r in rows:
         micro = int(r["micro"])
         if r["phase"] == "candidate":
-            rr = r.get("reward_raw", None)
+            rr = r.get("reward_train", None)
             if rr is None:
                 continue
             cand_by_micro.setdefault(micro, []).append(float(rr))
         elif r["phase"] == "executed":
             # executed reward is stored in reward_exec
-            re = r.get("reward_exec", None)
+            re = r.get("reward_train", None)
             if re is None:
                 continue
             exec_by_micro[micro] = float(re)
@@ -211,7 +263,7 @@ def log_grpo_row(rows, *, trigger, chunk, micro, micro_global, phase,
                 bg_before, bg_after,
                 tt_after, aa_after,
                 occ_mid,
-                reward_raw=None, reward_best_sample=None, reward_exec=None,
+                reward_raw=None, reward_train=None, kept=0, reward_best_sample=None, reward_exec=None,
                 executed=0, shielded=0):
         
     rows.append({
@@ -244,6 +296,8 @@ def log_grpo_row(rows, *, trigger, chunk, micro, micro_global, phase,
 
         "executed": int(executed),
         "shielded": int(shielded),
+        "reward_train": (None if reward_train is None else float(reward_train)),
+        "kept": int(kept),
     })
 def ecdf(x):
     """Creating error cdf"""
@@ -266,7 +320,7 @@ def summarize_paper_table(r_pct, s_tt, s_aa, cut_hist, target_pct, tol_pct):
       P95|e|↓   = 95th percentile of |r - r*|
       InBand↑   = mean( |r-r*| <= tol )
       UpViol↓   = mean( max(0, r - (r* + tol)) )   [only upward violations]
-      TV↓       = sum(|Δcut|)  (total variation / actuation)
+      DownViol↓ = mean( max(0, (r* - tol) - r) )        [downward violations only]
       tt↑       = mean(tt efficiency | in-band)
       h→4b↑     = mean(AA efficiency | in-band)
     """
@@ -289,11 +343,9 @@ def summarize_paper_table(r_pct, s_tt, s_aa, cut_hist, target_pct, tol_pct):
     out["P95_abs_err"] = float(np.percentile(abs_err, 95)) if r.size else np.nan
     out["InBand"] = float(np.mean(inband)) if r.size else np.nan
 
-    # Upward violation magnitude (rate too high beyond upper tolerance)
-    out["UpViol"] = float(np.mean(np.maximum(0.0, err - float(tol_pct)))) if r.size else np.nan
-
-    # Total variation of cut trajectory (actuation cost)
-    out["TV"] = float(np.sum(np.abs(dc))) if dc.size else 0.0
+    # Fractions (these relate to 1-InBand)
+    out["UpFrac"]   = float(np.mean(err >  float(tol_pct))) if r.size else np.nan
+    out["DownFrac"] = float(np.mean(err < -float(tol_pct))) if r.size else np.nan
 
     # Signal efficiencies conditioned on being in-band
     out["tt"] = safe_mean(s_tt, inband)
@@ -311,7 +363,7 @@ def write_paper_table(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct):
         return
 
     # ---- CSV ----
-    fieldnames = ["Trigger", "Method", "MAE", "P95_abs_err", "InBand", "UpViol", "TV", "tt", "h_to_4b"]
+    fieldnames = ["Trigger", "Method", "MAE", "P95_abs_err", "InBand", "UpViol", "DownViol", "TV", "tt", "h_to_4b"]
     with open(out_csv, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
@@ -320,7 +372,7 @@ def write_paper_table(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct):
 
     # ---- Bold best per trigger ----
     higher_better = {"InBand", "tt", "h_to_4b"}
-    lower_better  = {"MAE", "P95_abs_err", "UpViol", "TV"}
+    lower_better  = {"MAE", "P95_abs_err", "UpViol", "DownViol", "TV"}
 
     triggers = sorted(set(r["Trigger"] for r in rows))
     best = {tr: {} for tr in triggers}
@@ -362,17 +414,17 @@ def write_paper_table(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct):
     lines.append(r"\small")
     lines.append(r"\setlength{\tabcolsep}{6pt}")
     lines.append(r"\renewcommand{\arraystretch}{1.10}")
-    lines.append(r"\begin{tabular}{llrrrrrrr}")
+    lines.append(r"\begin{tabular}{llrrrrrrrr}")
     lines.append(r"\hline")
     lines.append(
         r"Trigger & Method & MAE$\downarrow$ & P95$|e|$$\downarrow$ & InBand$\uparrow$ & "
-        r"UpViol$\downarrow$ & TV$\downarrow$ & $t\bar{t}\uparrow$ & $h\rightarrow 4b\uparrow$ \\"
+        r"UpViol$\downarrow$ & DownViol$\downarrow$ & TV$\downarrow$ & $t\bar{t}\uparrow$ & $h\rightarrow 4b\uparrow$ \\"
     )
     lines.append(r"\hline")
 
     for tr in triggers:
         sub = [r for r in rows if r["Trigger"] == tr]
-        lines.append(rf"\multicolumn{{9}}{{l}}{{\textbf{{{tr} trigger}}}} \\")
+        lines.append(rf"\multicolumn{{10}}{{l}}{{\textbf{{{tr} trigger}}}} \\")
         for r in sub:
             m = r["Method"]
             lines.append(
@@ -381,6 +433,7 @@ def write_paper_table(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct):
                 f"{cell(tr,m,'P95_abs_err',r['P95_abs_err'])} & "
                 f"{cell(tr,m,'InBand',r['InBand'])} & "
                 f"{cell(tr,m,'UpViol',r['UpViol'])} & "
+                f"{cell(tr,m,'DownViol',r['DownViol'])} & "
                 f"{cell(tr,m,'TV',r['TV'])} & "
                 f"{cell(tr,m,'tt',r['tt'])} & "
                 f"{cell(tr,m,'h_to_4b',r['h_to_4b'])} \\\\"
@@ -392,7 +445,7 @@ def write_paper_table(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct):
         rf"\caption{{Summary of single-trigger control. Rates are in percent units with target "
         rf"$r^*={target_pct:.3f}\%$ and tolerance $\pm {tol_pct:.3f}\%$. "
         rf"InBand is the fraction of chunks within $|r-r^*|\le\tau$. "
-        rf"UpViol measures upward band violations. TV is total cut variation. "
+        rf"UpViol and DownViol measures upward/downward band violations. TV is total cut variation. "
         rf"$t\bar t$ and $h\rightarrow 4b$ are mean signal efficiencies conditioned on in-band chunks.}}"
     )
     lines.append(r"\label{tab:single_trigger_summary_paper}")
@@ -523,23 +576,29 @@ def main():
     ap.add_argument("--score-dim-hint", type=int, default=2)
     ap.add_argument("--as-dim", type=int, default=2, choices=[1, 2, 4])
 
-    ap.add_argument("--as-deltas", type=str, default="-3,-1.5,0,1.5,3")
-    ap.add_argument("--as-step", type=float, default=0.5)
+    ap.add_argument("--as-deltas", type=str, default="-3,-1.5,0,1.5,3") #originally no 5 7
+    ap.add_argument("--as-step", type=float, default=0.5) #0.5
 
     ap.add_argument("--print-keys", action="store_true")
     ap.add_argument("--print-keys-max", type=int, default=None)
 
     ap.add_argument("--window-events-chunk-size", type=int, default=3)
     ap.add_argument("--seq-len", type=int, default=128)
-    ap.add_argument("--inner-stride", type=int, default=10000)
+
+    # making it a sliding window
+    ap.add_argument("--micro-stride", type=int, default=5000,
+                help="events per micro update step (small step)")
+    ap.add_argument("--micro-window", type=int, default=50000,
+                help="events used to evaluate bg rate / reward at each micro step")
 
     # GRPO kwargs
-    ap.add_argument("--group-size", type=int, default=16)
+    ap.add_argument("--group-size-sample", type=int, default=32, choices=[16,22,32])
+    ap.add_argument("--group-size-keep", type=int, default=16, choices=[16,22,32])
     ap.add_argument("--train-every", type=int, default=50)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--beta-kl", type=float, default=0.02)
     ap.add_argument("--ent-coef", type=float, default=0.01)
-    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--lr", type=float, default=2e-4) #origianlly 3e-4
 
     # objective/reward
     ap.add_argument("--target", type=float, default=0.25)   # percent
@@ -562,15 +621,22 @@ def main():
     ap.add_argument("--dqn-eps-min", type=float, default=0.05)
     ap.add_argument("--dqn-eps-decay", type=float, default=0.98)
     ap.add_argument("--run-ht", action="store_true", help="also run HT trigger GRPO baselines/plots")
-    ap.add_argument("--ht-deltas", type=str, default="-2,-1,0,1,2")
+    ap.add_argument("--ht-deltas", type=str, default="-2,-1,0,1,2") #originally no 5 7
     ap.add_argument("--ht-step", type=float, default=1.0)
 
-    ap.add_argument("--band-mult", type=float, default=1.0,
-                help="candidate filter band: |bg-target| <= band-mult * tol (1.0 = exact tolerance)")
+    ap.add_argument("--band-mult-ht", type=float, default=1.0,
+                help="HT candidate filter band: |bg-target| <= band-mult * tol (1.0 = exact tolerance)")
+    ap.add_argument("--band-mult-as", type=float, default=1.0,
+                help="AS candidate filter band: |bg-target| <= band-mult * tol (1.0 = exact tolerance)")
     ap.add_argument("--sig-bonus", type=float, default=1.0,
-                help="extra bonus weight for signal score inside band (helps avoid bg-only overfit)")
+                help="HT extra bonus weight for signal score inside band (helps avoid bg-only overfit)")
+    ap.add_argument("--sig-bonus-as", type=float, default=1.0,
+                help="AS extra bonus weight for signal score inside band (helps avoid bg-only overfit)")
+
 
     args = ap.parse_args()
+    # logs (background in percent units first)
+    target = float(args.target)
 
     if args.print_keys:
         print_h5_tree(args.input, max_items=args.print_keys_max)
@@ -655,6 +721,8 @@ def main():
     last_das = 0.0
     prev_bg_as = None
 
+    #dqn
+    AS_cut_dqn = fixed_AS_cut
     # action space
     AS_DELTAS = np.array([float(x) for x in args.as_deltas.split(",")], dtype=np.float32)
     AS_STEP = float(args.as_step)
@@ -663,20 +731,83 @@ def main():
     # features
     K = int(args.seq_len)
     near_widths_as = (0.25, 0.5, 1.0)
-    feat_dim_as = 10 + len(near_widths_as)
+
+
+    probe_len = max(K, 256)
+    probe_lo = win_lo
+    probe_hi = min(win_lo + probe_len, N)
+    probe_idx = np.arange(probe_lo, probe_hi)
+
+    # AS probe
+    probe_bas = Bas[probe_idx]
+    probe_bnpv = Bnpv[probe_idx]
+    probe_bg_as = Sing_Trigger(probe_bas, fixed_AS_cut)
+
+    probe_obs_as = make_event_seq_as(
+        bas=probe_bas, bnpv=probe_bnpv,
+        bg_rate=probe_bg_as,
+        prev_bg_rate=probe_bg_as,
+        cut=fixed_AS_cut,
+        as_mid=as_mid, as_span=as_span,
+        target=target, K=K,
+        last_delta=0.0,
+        max_delta=MAX_DELTA_AS,
+        near_widths=near_widths_as,
+        step=AS_STEP,
+    )
+    feat_dim_as = int(np.asarray(probe_obs_as).shape[-1])
+
+    print(f"[DEBUG] inferred feat_dim_as={feat_dim_as}")
+
 
     # logs (background in percent units first)
     target = float(args.target)
     tol = float(args.tol)
     run_label = "MC" if args.control == "MC" else "283408"
 
-    # GRPO agent
+    # ------------------ infer feature dims BEFORE building any agents ------------------
+    def infer_feat_dim_as():
+        probe_idx = np.arange(win_lo, min(win_lo + max(K, 256), N))
+        probe_bas = Bas[probe_idx]
+        probe_bnpv = Bnpv[probe_idx]
+        probe_bg = Sing_Trigger(probe_bas, fixed_AS_cut)
+        # obs = make_event_seq_as(
+        # bas=probe_bas, bnpv=probe_bnpv,
+        # bg_rate=probe_bg, prev_bg_rate=probe_bg,
+        # cut=fixed_AS_cut,
+        # as_mid=as_mid, as_span=as_span,
+        # target=target, K=K,
+        # last_delta=0.0, max_delta=MAX_DELTA_AS,
+        # near_widths=near_widths_as,
+        # step=AS_STEP,
+        # )
+        obs = make_event_seq_as(
+        bas=probe_bas, bnpv=probe_bnpv,
+        bg_rate=probe_bg, prev_bg_rate=probe_bg,
+        cut=fixed_AS_cut,
+        as_mid=as_mid, as_span=as_span,
+        target=target, K=K,
+        last_delta=0.0, max_delta=MAX_DELTA_AS,
+        near_widths=near_widths_as,
+        step=AS_STEP,
+        tol=tol,
+        err_i=0.0,
+        d_bg_d_cut=0.0,
+        )
+        return int(np.asarray(obs).shape[-1])
+
+
+    feat_dim_as = infer_feat_dim_as()
+    print(f"[DEBUG] inferred feat_dim_as={feat_dim_as}")
+
+    
+    # GRPO agent AS
     cfg = GRPOConfig(
         lr=args.lr,
         beta_kl=args.beta_kl,
         ent_coef=args.ent_coef,
         device="cpu",
-        batch_size=128,
+        batch_size=64,
         train_epochs=2,
         ref_update_interval=200,
     )
@@ -702,23 +833,62 @@ def main():
     dqn_as = SeqDQNAgent(seq_len=K, feat_dim=feat_dim_as, n_actions=len(AS_DELTAS),
                         cfg=dqn_cfg, seed=SEED)
 
-    AS_cut_dqn = fixed_AS_cut
+    
     prev_bg_dqn = None
     last_das_dqn = 0.0
     dqn_losses = []
     dqn_rewards = []
 
+    err_i_as_dqn  = 0.0
+    err_i_as_grpo = 0.0
+
     if args.run_ht:
+        err_i_ht_dqn  = 0.0
+        err_i_ht_grpo = 0.0
+
+
         HT_DELTAS = np.array([float(x) for x in args.ht_deltas.split(",")], dtype=np.float32)
         HT_STEP = float(args.ht_step)
         MAX_DELTA_HT = float(np.max(np.abs(HT_DELTAS))) * HT_STEP
-
         near_widths_ht = (5.0, 10.0, 20.0)
-        feat_dim_ht = 10 + len(near_widths_ht)
+        def infer_feat_dim_ht():
+            probe_idx = np.arange(win_lo, min(win_lo + max(K, 256), N))
+            probe_bht = Bht[probe_idx]
+            probe_bnpv = Bnpv[probe_idx]
+            probe_bg = Sing_Trigger(probe_bht, fixed_Ht_cut)
+            # obs = make_event_seq_ht(
+            # bht=probe_bht, bnpv=probe_bnpv,
+            # bg_rate=probe_bg, prev_bg_rate=probe_bg,
+            # cut=fixed_Ht_cut,
+            # ht_mid=ht_mid, ht_span=ht_span,
+            # target=target, K=K,
+            # last_delta=0.0, max_delta=MAX_DELTA_HT,
+            # near_widths=near_widths_ht,
+            # step=HT_STEP,
+            # )
+            obs = make_event_seq_ht(
+            bht=probe_bht, bnpv=probe_bnpv,
+            bg_rate=probe_bg, prev_bg_rate=probe_bg,
+            cut=fixed_Ht_cut,
+            ht_mid=ht_mid, ht_span=ht_span,
+            target=target, K=K,
+            last_delta=0.0, max_delta=MAX_DELTA_HT,
+            near_widths=near_widths_ht,
+            step=HT_STEP,
+            tol=tol,
+            err_i=0.0,
+            d_bg_d_cut=0.0,
+            )
+            return int(np.asarray(obs).shape[-1])
+        
+        feat_dim_ht = infer_feat_dim_ht()
+        print(f"[DEBUG] inferred feat_dim_ht={feat_dim_ht}")
+
+         
 
         cfg_ht = GRPOConfig(
             lr=args.lr, beta_kl=args.beta_kl, ent_coef=args.ent_coef,
-            device="cpu", batch_size=256, train_epochs=2, ref_update_interval=200,
+            device="cpu", batch_size=64, train_epochs=2, ref_update_interval=200,
         )
         agent_ht = GRPOAgent(
                 seq_len=K, feat_dim=feat_dim_ht, n_actions=len(HT_DELTAS),
@@ -735,6 +905,8 @@ def main():
                 w_occ=float(args.occ_pen)
             )
         )
+
+
 
         Ht_cut_grpo = fixed_Ht_cut
         last_dht = 0.0
@@ -781,8 +953,7 @@ def main():
     if args.run_ht:
         roll_ht = RollingWindowHT(max_events=int(args.window_events_chunk_size * chunk_size))
 
-    # logs (background in percent units first)
-    target = float(args.target)
+    
     tol = float(args.tol)
     run_label = "MC" if args.control == "MC" else "283408"
 
@@ -798,15 +969,16 @@ def main():
 
     losses = []
     rewards = []
-    # --- GRPO sampled reward logs ---
-    # grpo_as_samples = []   # list of dict rows AD
-    # grpo_ht_samples = []   # only used if --run-ht Ht
+
+    # ---- near-cut occupancy logs (chunk-level) ----
+    Occ_const_ad, Occ_pd_ad, Occ_dqn_ad, Occ_grpo_ad = [], [], [], []
+    Occ_const_ht, Occ_pd_ht, Occ_dqn_ht, Occ_grpo_ht = [], [], [], []  # if --run-ht        
 
     batch_starts = list(range(start_event, N, chunk_size))
     micro_counter = 0
     grpo_samples = []   # one table, add column "trigger" = {"AS","HT"}
 
-    micro_global = 0    # optional: single timeline across AS+HT micro-steps
+    micro_global = 0    # single timeline across AS+HT micro-steps
 
     for t, I in enumerate(batch_starts):
         end = min(I + chunk_size, N, len(Bnpv))
@@ -846,41 +1018,76 @@ def main():
                 sht_aa = Aht[mask_aa]
 
 
-        stride = max(500, int(args.inner_stride))
-        n_micro = max(1, int(np.ceil((end - I) / stride)))
+        # stride = max(500, int(args.inner_stride))
+        # n_micro = max(1, int(np.ceil((end - I) / stride)))
+        # print('n_micro {}'.format(n_micro))
+        micro_stride = max(1, int(args.micro_stride))
+        micro_window = max(micro_stride, int(args.micro_window))
+
+        n_micro = max(1, int(np.ceil((end - I) / micro_stride)))
+        print('n_micro {}'.format(n_micro))
 
         micro_rewards = []
         micro_rewards_ht = []   # HT-GRPO executed rewards per micro-step (this chunk)
 
 
         for j in range(n_micro):
-            j_lo = I + j * stride
-            j_hi = min(I + (j + 1) * stride, end)
-            if j_hi <= j_lo:
+            # new events arriving this micro-step
+            j_new_lo = I + j * micro_stride
+            j_new_hi = min(j_new_lo + micro_stride, end)
+            if j_new_hi <= j_new_lo:
                 continue
 
-            idxj = np.arange(j_lo, j_hi)
+            idx_new = np.arange(j_new_lo, j_new_hi)
+            bas_new = Bas[idx_new]
+            bnpv_new = Bnpv[idx_new]
 
-            # --- micro-slice arrays ---
-            bas_j = Bas[idxj]
-            bnpv_j = Bnpv[idxj]
-
-            # --- update rolling windows ONCE per micro-step ---
-            roll.append(bas_j, bnpv_j)
+            # update rolling features with ONLY the new arrivals
+            roll.append(bas_new, bnpv_new)
             bas_w, bnpv_w = roll.get()
 
+            # evaluation window for bg/reward (overlapping, slides by micro_stride)
+            j_eval_lo = max(I, j_new_hi - micro_window)
+            idx_eval = np.arange(j_eval_lo, j_new_hi)
+            bas_eval = Bas[idx_eval]
+            bnpv_eval = Bnpv[idx_eval]
+            # ---- micro evaluation slice (THIS replaces old bas_j/bnpv_j/idxj logic) ----
+            bas_j = bas_eval
+            bnpv_j = bnpv_eval
+ 
             if args.run_ht:
-                bht_j = Bht[idxj]
-                roll_ht.append(bht_j, bnpv_j)
+                 # rolling state window gets ONLY new arrivals
+                bht_new = Bht[idx_new]
+                roll_ht.append(bht_new, bnpv_new)
                 bht_w, bnpv_w_ht = roll_ht.get()
+ 
+                # evaluation slice for measuring rate/reward this micro-step
+                bht_j = Bht[idx_eval]
+            # j_lo = I + j * stride
+            # j_hi = min(I + (j + 1) * stride, end)
+            # if j_hi <= j_lo:
+            #     continue
+
+            # idxj = np.arange(j_lo, j_hi)
+
+            # # --- micro-slice arrays ---
+            # bas_j = Bas[idxj]
+            # bnpv_j = Bnpv[idxj]
+
+            # # --- update rolling windows ONCE per micro-step ---
+            # roll.append(bas_j, bnpv_j)
+            # bas_w, bnpv_w = roll.get()
 
                 # ============================================================
-                # HT micro-step: DQN + GRPO
+                # HT micro-step: DQN + GRPO(filtered) essentially GFPO
                 # ============================================================
                 # ----- HT DQN -----
                 bg_before_ht_dqn = Sing_Trigger(bht_j, Ht_cut_dqn)
                 if prev_bg_ht_dqn is None:
                     prev_bg_ht_dqn = bg_before_ht_dqn
+
+                err_i_ht_dqn = update_err_i(err_i_ht_dqn, bg_before_ht_dqn, target)
+                dbgcut_ht_dqn = d_bg_d_cut_norm(bht_j, Ht_cut_dqn, HT_STEP, target)
 
                 obs_ht_dqn = make_event_seq_ht(
                     bht=bht_w, bnpv=bnpv_w_ht,
@@ -892,6 +1099,10 @@ def main():
                     last_delta=last_dht_dqn,
                     max_delta=MAX_DELTA_HT,
                     near_widths=near_widths_ht,
+                    step = HT_STEP,
+                    tol = tol,
+                    err_i = err_i_ht_dqn,
+                    d_bg_d_cut = dbgcut_ht_dqn
                 )
 
                 eps_ht = max(float(args.dqn_eps_min), 1.0 * (float(args.dqn_eps_decay) ** ht_dqn_step))
@@ -908,6 +1119,8 @@ def main():
                 tt_after_ht_dqn = Sing_Trigger(sht_tt, cut_next_ht_dqn)
                 aa_after_ht_dqn = Sing_Trigger(sht_aa, cut_next_ht_dqn)
 
+                dbgcut_ht_next = d_bg_d_cut_norm(bht_j, cut_next_ht_dqn, HT_STEP, target)
+
                 obs_next_ht_dqn = make_event_seq_ht(
                     bht=bht_w, bnpv=bnpv_w_ht,
                     bg_rate=bg_after_ht_dqn,
@@ -918,6 +1131,10 @@ def main():
                     last_delta=dht_dqn,
                     max_delta=MAX_DELTA_HT,
                     near_widths=near_widths_ht,
+                    step = HT_STEP,
+                    tol = tol,
+                    err_i = update_err_i(err_i_ht_dqn, bg_after_ht_dqn, target),
+                    d_bg_d_cut=dbgcut_ht_next
                 )
                 occ_mid_ht_dqn = float(near_occupancy(bht_j, Ht_cut_dqn, near_widths_ht)[1])  # width=10
 
@@ -948,11 +1165,12 @@ def main():
                 dqn_ht_rewards.append(float(r_ht_dqn))
                 ht_dqn_step += 1
 
-                # ----- HT GRPO -----
+                # ----- HT GRPO(filtered) essentially GFPO -----
                 bg_before_ht = Sing_Trigger(bht_j, Ht_cut_grpo)
                 if prev_bg_ht is None:
                     prev_bg_ht = bg_before_ht
-
+                err_i_ht_grpo = update_err_i(err_i_ht_grpo, bg_before_ht, target)
+                dbgcut_ht_grpo = d_bg_d_cut_norm(bht_j, Ht_cut_grpo, HT_STEP, target)
                 obs_ht = make_event_seq_ht(
                     bht=bht_w, bnpv=bnpv_w_ht,
                     bg_rate=bg_before_ht,
@@ -963,40 +1181,46 @@ def main():
                     last_delta=last_dht,
                     max_delta=MAX_DELTA_HT,
                     near_widths=near_widths_ht,
+                    step=HT_STEP,
+                    tol = tol,
+                    err_i = err_i_ht_grpo,
+                    d_bg_d_cut = dbgcut_ht_grpo
                 )
 
-                G = int(args.group_size)
+                G_sample = int(args.group_size_sample)
+                G_KEEP = int(args.group_size_keep)
                 acts_ht, old_logps_ht = agent_ht.sample_group_actions(
-                        obs_ht, group_size=G, temperature=float(args.temperature)
+                        obs_ht, group_size=G_sample, temperature=float(args.temperature)
                 )
 
-                cand_sig_ht = np.zeros(G, dtype=np.float32)
-                cand_inband_ht = np.zeros(G, dtype=np.bool_)
-                cand_abs_err_ht = np.zeros(G, dtype=np.float32)
 
-                cand_rewards_raw_ht = np.zeros(G, dtype=np.float32)
-                cand_rewards_train_ht = np.zeros(G, dtype=np.float32)
+                cand_abs_err_ht = np.zeros(G_sample, dtype=np.float32)
+                cand_sig_ht = np.zeros(G_sample, dtype=np.float32)
+                cand_rewards_raw_ht = np.zeros(G_sample, dtype=np.float32)
+                cand_rewards_train_ht = np.zeros(G_sample, dtype=np.float32)
+
+                cand_a_ht = np.zeros(G_sample, dtype=np.int32)
+                cand_delta_ht = np.zeros(G_sample, dtype=np.float32)
+                cand_bg_after_ht = np.zeros(G_sample, dtype=np.float32)
+                cand_cut_next_ht = np.zeros(G_sample, dtype=np.float32) #DEBUG
+                cand_tt_after_ht  = np.zeros(G_sample, dtype=np.float32)
+                cand_aa_after_ht  = np.zeros(G_sample, dtype=np.float32)
 
                 occ_mid_ht = float(near_occupancy(bht_j, Ht_cut_grpo, near_widths_ht)[1])  # width=10
 
-                for k in range(G):
+                for k in range(G_sample):
                     a = int(acts_ht[k])
                     dht = float(HT_DELTAS[a] * HT_STEP)
 
                     cut_next = float(np.clip(Ht_cut_grpo + dht, ht_lo, ht_hi))
+                    
                     bg_after = Sing_Trigger(bht_j, cut_next)
-
                     tt_after = Sing_Trigger(sht_tt, cut_next)
                     aa_after = Sing_Trigger(sht_aa, cut_next)
 
                     abs_err = abs(float(bg_after) - float(target))
-                    inband = (abs_err <= float(args.band_mult) * float(tol))
 
                     sig_score = float(agent_ht.reward_cfg.mix) * float(tt_after) + (1.0 - float(agent_ht.reward_cfg.mix)) * float(aa_after)
-
-                    cand_abs_err_ht[k] = abs_err
-                    cand_inband_ht[k] = inband
-                    cand_sig_ht[k] = sig_score
 
 
                     r_raw = agent_ht.compute_reward(
@@ -1010,12 +1234,32 @@ def main():
                         update_dual=False,
                     )
 
+                    inband = (abs_err <= float(args.band_mult_ht) * float(tol))
+
                     r_train = float(r_raw) + float(args.sig_bonus) * float(sig_score) * (1.0 if inband else 0.0)
 
-                    cand_rewards_raw_ht[k] = float(r_raw)
-                    cand_rewards_train_ht[k] = float(r_train)
+                    cand_a_ht[k]         = a
+                    cand_delta_ht[k]     = dht
+                    cand_cut_next_ht[k]  = cut_next
+                    cand_bg_after_ht[k]  = bg_after
+                    cand_tt_after_ht[k]  = tt_after
+                    cand_aa_after_ht[k]  = aa_after
 
+                    cand_abs_err_ht[k]       = abs_err
+                    cand_sig_ht[k]           = sig_score
+                    cand_rewards_raw_ht[k]   = r_raw
+                    cand_rewards_train_ht[k] = r_train
 
+                # 2) select TOP-G_keep smallest background deviation
+                order_ht = np.argsort(cand_abs_err_ht)  # ascending abs(bg-target)
+                keep_ht = order_ht[:min(G_KEEP, G_sample)]
+                keep_mask_ht = np.zeros(G_sample, dtype=np.bool_)
+                keep_mask_ht[keep_ht] = True
+
+                # pick executed action as smallest abs_err, tie-break by higher sig
+                k_best = int(keep_ht[np.lexsort((-cand_sig_ht[keep_ht], cand_abs_err_ht[keep_ht]))][0])
+
+                for k in range(G_sample):
                     log_grpo_row(
                         grpo_samples,
                         trigger="HT",
@@ -1024,53 +1268,53 @@ def main():
                         micro_global=micro_global,
                         phase="candidate",
                         k=k,
-                        a=a,
-                        delta=dht,
+                        a=int(cand_a_ht[k]),
+                        delta=float(cand_delta_ht[k]),
                         step=HT_STEP,
                         cut_before=Ht_cut_grpo,
-                        cut_next=cut_next,
+                        cut_next=float(cand_cut_next_ht[k]),
                         cut_lo=ht_lo,
                         cut_hi=ht_hi,
-                        bg_before=bg_before_ht,
-                        bg_after=bg_after,
-                        tt_after=tt_after,
-                        aa_after=aa_after,
-                        occ_mid=occ_mid_ht,
-                        reward_raw=r_raw,
+                        bg_before=float(bg_before_ht),
+                        bg_after=float(cand_bg_after_ht[k]),
+                        tt_after=float(cand_tt_after_ht[k]),
+                        aa_after=float(cand_aa_after_ht[k]),
+                        occ_mid=float(occ_mid_ht),
+                        reward_raw=float(cand_rewards_raw_ht[k]),
                         executed=0,
                         shielded=0,
+                        reward_train=float(cand_rewards_train_ht[k]),
+                        kept=int(keep_mask_ht[k]),
                     )
                     micro_global += 1
 
+                if (ht_micro_counter % 100) == 0:
+                    band_mult_ht = float(args.band_mult_ht)
+                    lo = float(target) - band_mult_ht * float(tol)
+                    hi = float(target) + band_mult_ht * float(tol)
 
-                keep_ht = np.where(cand_inband_ht)[0]
-                if (ht_micro_counter % 200) == 0:
-                    print(f"[HT] keep size {keep_ht.size}/{G}")
-
-                if keep_ht.size > 0:
-                    tie = 1e-3 * cand_rewards_train_ht[keep_ht]
-                    k_best = int(keep_ht[np.argmax(cand_sig_ht[keep_ht] + tie)])
-
-                    agent_ht.store_group(
-                        obs=obs_ht,
-                        actions=acts_ht[keep_ht],
-                        logp=old_logps_ht[keep_ht],
-                        rewards=cand_rewards_train_ht[keep_ht],
-                        baseline="mean",
-                    )
-                else:
-                    k_best = int(np.argmin(cand_abs_err_ht))
-                    agent_ht.store_group(
-                        obs=obs_ht,
-                        actions=acts_ht,
-                        logp=old_logps_ht,
-                        rewards=cand_rewards_train_ht,
-                        baseline="mean",
+                    c = cand_bg_after_ht  # bg% for each candidate
+                    print(
+                        f"[HT] keep {keep_ht.size}/{G_sample}  "
+                        f"band%=[{lo:.4f},{hi:.4f}]  "
+                        f"(kHz=[{lo*RATE_SCALE_KHZ:.1f},{hi*RATE_SCALE_KHZ:.1f}])  "
+                        f"cand_bg% min/med/max={c.min():.4f}/{np.median(c):.4f}/{c.max():.4f}  "
+                        f"sig med={np.median(cand_sig_ht):.3f}  "
+                        f"abs_err med={np.median(cand_abs_err_ht):.4f}"
                     )
 
+                # 4) train ONLY on kept top-16
+                agent_ht.store_group(
+                    obs=obs_ht,
+                    actions=acts_ht[keep_ht],
+                    logp=old_logps_ht[keep_ht],
+                    rewards=cand_rewards_train_ht[keep_ht],
+                    baseline="mean",
+                )
 
+                # 5) execute k_best (then keep the shield + dual update )
                 a_exec = int(acts_ht[k_best])
-                ht_exec = float(HT_DELTAS[a_exec] * HT_STEP)
+                dht_exec = float(HT_DELTAS[a_exec] * HT_STEP)
 
                 sd = shield_delta(bg_before_ht, target, tol, MAX_DELTA_HT)
                 if sd is not None:
@@ -1091,10 +1335,11 @@ def main():
                     occ_mid=occ_mid_ht,
                     update_dual=True,
                 )  
-                micro_rewards_ht.append(float(r_exec))
+                ht_rewards.append(float(r_exec))
 
-
-                
+                abs_err_exec = abs(float(bg_after_exec) - float(target))
+                inband_exec = (abs_err_exec <= float(args.band_mult_ht) * float(tol))   # HT
+                kept_flag = int(inband_exec)
                 log_grpo_row(
                     grpo_samples,
                     trigger="HT",
@@ -1119,28 +1364,44 @@ def main():
                     reward_exec=r_exec,                                 # reward of executed (post-shield)
                     executed=1,
                     shielded=int(sd is not None),
+                    reward_train = r_exec,
+                    kept = kept_flag
                 )
                 
 
                 micro_global += 1
-                ht_rewards.append(float(np.mean(micro_rewards_ht)) if micro_rewards_ht else np.nan)
+                # ht_rewards.append(float(np.mean(micro_rewards_ht)) if micro_rewards_ht else np.nan)
 
                 Ht_cut_grpo = cut_next_exec
                 prev_bg_ht = bg_after_exec
                 last_dht = dht_exec
+
+                bg_at_hi = Sing_Trigger(bht_j, ht_hi)
+                bg_at_lo = Sing_Trigger(bht_j, ht_lo) 
+                if (ht_micro_counter % 100) == 0:
+                    print(f"[HT] feasibility: bg@ht_hi={bg_at_hi:.4f}  bg@ht_lo={bg_at_lo:.4f}  band=[{target-tol:.4f},{target+tol:.4f}]")
+
+                    print(f"[HT] cut_next min/med/max={cand_cut_next_ht.min():.3f}/{np.median(cand_cut_next_ht):.3f}/{cand_cut_next_ht.max():.3f} "
+                        f" | Ht_cut_grpo={Ht_cut_grpo:.3f} clip=({ht_lo:.3f},{ht_hi:.3f})")
 
                 ht_micro_counter += 1
                 if ht_micro_counter % int(args.train_every) == 0:
                     loss = agent_ht.update()
                     if loss is not None:
                         ht_losses.append(float(loss))
+                
+
+
 
             # ============================================================
-            # AS micro-step: DQN + GRPO  
+            # AS micro-step: DQN + GRPO(filtered) essentially GFPO  
             # ============================================================
             bg_before_dqn = Sing_Trigger(bas_j, AS_cut_dqn)
             if prev_bg_dqn is None:
                 prev_bg_dqn = bg_before_dqn
+
+            err_i_as_dqn = update_err_i(err_i_as_dqn, bg_before_dqn, target)
+            dbgcut_as_dqn = d_bg_d_cut_norm(bas_j, AS_cut_dqn, AS_STEP, target)
 
             obs_dqn = make_event_seq_as(
                 bas=bas_w, bnpv=bnpv_w,
@@ -1152,6 +1413,10 @@ def main():
                 last_delta=last_das_dqn,
                 max_delta=MAX_DELTA_AS,
                 near_widths=near_widths_as,
+                step=AS_STEP,                 # new
+                tol=tol,
+                err_i=err_i_as_dqn,
+                d_bg_d_cut=dbgcut_as_dqn,
             )
 
             step = micro_counter
@@ -1170,6 +1435,8 @@ def main():
             tt_after_dqn = Sing_Trigger(sas_tt, cut_next_dqn)
             aa_after_dqn = Sing_Trigger(sas_aa, cut_next_dqn)
 
+            dbgcut_as_next = d_bg_d_cut_norm(bas_j, cut_next_dqn, AS_STEP, target)
+
             obs_next_dqn = make_event_seq_as(
                 bas=bas_w, bnpv=bnpv_w,
                 bg_rate=bg_after_dqn,
@@ -1180,6 +1447,10 @@ def main():
                 last_delta=das_dqn,
                 max_delta=MAX_DELTA_AS,
                 near_widths=near_widths_as,
+                step = AS_STEP,
+                tol=tol,
+                err_i=update_err_i(err_i_as_dqn, bg_after_dqn, target),  # optional; or keep err_i_as_dqn
+                d_bg_d_cut=dbgcut_as_next,
             )
 
             r_dqn = SeqDQNAgent.compute_reward(
@@ -1212,6 +1483,9 @@ def main():
             if prev_bg_as is None:
                 prev_bg_as = bg_before
 
+            err_i_as_grpo = update_err_i(err_i_as_grpo, bg_before, target)
+            dbgcut_as_grpo = d_bg_d_cut_norm(bas_j, AS_cut_grpo, AS_STEP, target)
+
             obs = make_event_seq_as(
             bas=bas_w, bnpv=bnpv_w,
             bg_rate=bg_before,
@@ -1222,39 +1496,47 @@ def main():
             last_delta=last_das,
             max_delta=MAX_DELTA_AS,
             near_widths=near_widths_as,
+            step = AS_STEP,
+            tol=tol,
+            err_i=err_i_as_grpo,
+            d_bg_d_cut=dbgcut_as_grpo,
             )
 
-            G = int(args.group_size)
-            acts, old_logps = agent.sample_group_actions(obs, group_size=G, temperature=float(args.temperature))
+            G_sample = int(args.group_size_sample)
+            G_KEEP = int(args.group_size_keep)
 
-            cand_sig = np.zeros(G, dtype=np.float32)
-            cand_inband = np.zeros(G, dtype=np.bool_)
-            cand_abs_err = np.zeros(G, dtype=np.float32)
+            acts, old_logps = agent.sample_group_actions(obs, group_size=G_sample, temperature=float(args.temperature))
 
-            cand_rewards_raw = np.zeros(G, dtype=np.float32)    # raw reward (for advantage reconstruction)
-            cand_rewards_train = np.zeros(G, dtype=np.float32)  # training reward (raw + inband*sig_bonus*sig_score)
+            cand_a         = np.zeros(G_sample, dtype=np.int32)
+            cand_delta     = np.zeros(G_sample, dtype=np.float32)
+            cand_cut_next  = np.zeros(G_sample, dtype=np.float32)
+            cand_bg_after  = np.zeros(G_sample, dtype=np.float32)
+            cand_tt_after  = np.zeros(G_sample, dtype=np.float32)
+            cand_aa_after  = np.zeros(G_sample, dtype=np.float32)
+
+            cand_abs_err       = np.zeros(G_sample, dtype=np.float32)
+            cand_sig           = np.zeros(G_sample, dtype=np.float32)
+            cand_rewards_raw   = np.zeros(G_sample, dtype=np.float32)
+            cand_rewards_train = np.zeros(G_sample, dtype=np.float32)
+
             occ_mid = float(near_occupancy(bas_j, AS_cut_grpo, near_widths_as)[1])  # w=0.5
 
-            for k in range(G):
+            
+            for k in range(G_sample):
                 a = int(acts[k])
                 das = float(AS_DELTAS[a] * AS_STEP)
 
                 cut_next = float(np.clip(AS_cut_grpo + das, as_lo, as_hi))
                 bg_after = Sing_Trigger(bas_j, cut_next)
-
                 tt_after = Sing_Trigger(sas_tt, cut_next)
                 aa_after = Sing_Trigger(sas_aa, cut_next)
 
                 abs_err = abs(float(bg_after) - float(target))
-                inband = (abs_err <= float(args.band_mult) * float(tol))
 
                 sig_score = float(agent.reward_cfg.mix) * float(tt_after) + (1.0 - float(agent.reward_cfg.mix)) * float(aa_after)
 
-                cand_abs_err[k] = abs_err
-                cand_inband[k] = inband
-                cand_sig[k] = sig_score
 
-                r = agent.compute_reward(
+                r_raw = agent.compute_reward(
                     bg_after=bg_after,
                     tt_after=tt_after,
                     aa_after=aa_after,
@@ -1264,12 +1546,33 @@ def main():
                     occ_mid=occ_mid,
                     update_dual=False,   # only matters if mode="lag"
                 )
+                inband = (abs_err <= float(args.band_mult_as) * float(tol))
+                r_train = r_raw + float(args.sig_bonus_as) * sig_score * (1.0 if inband else 0.0)
 
-                r_train = float(r) + float(args.sig_bonus) * float(sig_score) * (1.0 if inband else 0.0)
+                cand_a[k]         = a
+                cand_delta[k]     = das
+                cand_cut_next[k]  = cut_next
+                cand_bg_after[k]  = bg_after
+                cand_tt_after[k]  = tt_after
+                cand_aa_after[k]  = aa_after
 
-                cand_rewards_raw[k] = float(r_raw)
-                cand_rewards_train[k] = float(r_train)
+                cand_abs_err[k]       = abs_err
+                cand_sig[k]           = sig_score
+                cand_rewards_raw[k]   = r_raw
+                cand_rewards_train[k] = r_train
+            
+            # TOP-G_keep by smallest background deviation
+            order = np.argsort(cand_abs_err)
+            keep = order[:min(G_KEEP, G_sample)]
+            keep_mask = np.zeros(G_sample, dtype=np.bool_)
+            keep_mask[keep] = True
 
+            # AS executed = best among kept (abs_err asc, signal desc tie-break)
+            k_best = int(keep[np.lexsort((-cand_sig[keep], cand_abs_err[keep]))][0])
+
+
+            # log candidates (kept=top16)
+            for k in range(G_sample):
                 log_grpo_row(
                     grpo_samples,
                     trigger="AS",
@@ -1278,49 +1581,35 @@ def main():
                     micro_global=micro_global,
                     phase="candidate",
                     k=k,
-                    a=a,
-                    delta=das,
+                    a=int(cand_a[k]),
+                    delta=float(cand_delta[k]),
                     step=AS_STEP,
                     cut_before=AS_cut_grpo,
-                    cut_next=cut_next,
+                    cut_next=float(cand_cut_next[k]),
                     cut_lo=as_lo,
                     cut_hi=as_hi,
-                    bg_before=bg_before,
-                    bg_after=bg_after,
-                    tt_after=tt_after,
-                    aa_after=aa_after,
-                    occ_mid=occ_mid,
-                    reward_raw=r_raw,
+                    bg_before=float(bg_before),
+                    bg_after=float(cand_bg_after[k]),
+                    tt_after=float(cand_tt_after[k]),
+                    aa_after=float(cand_aa_after[k]),
+                    occ_mid=float(occ_mid),
+                    reward_raw=float(cand_rewards_raw[k]),
                     executed=0,
                     shielded=0,
+                    kept=int(keep_mask[k]),
+                    reward_train=float(cand_rewards_train[k]),
                 )
                 micro_global += 1
-
-
-            keep = np.where(cand_inband)[0]
-            if (micro_counter % 200) == 0:
-                print(f"[AS] keep size {keep.size}/{G}")
-
-            if keep.size > 0:
-                # primary: maximize signal among feasible candidates
-                # tiny tie-break with reward so it doesn't pick crazy-move actions if signal ties
-                tie = 1e-3 * cand_rewards_train[keep]
-                k_best = int(keep[np.argmax(cand_sig[keep] + tie)])
-                # Train only on feasible candidates (focus updates on the feasible set)
-                agent.store_group(
-                    obs=obs,
-                    actions=acts[keep],
-                    logp=old_logps[keep],
-                    rewards=cand_rewards_train[keep],
-                    baseline="mean",
-                )
-            else:
-                # fallback when no candidate is feasible: minimize abs error (closest-to-band)
-                k_best = int(np.argmin(cand_abs_err))
-                # if nothing feasible, still learn to move toward feasibility
-                agent.store_group(obs=obs, actions=acts, logp=old_logps, rewards=cand_rewards_train, baseline="mean")
-
             
+            # train only on top-16
+            agent.store_group(
+                obs=obs,
+                actions=acts[keep],
+                logp=old_logps[keep],
+                rewards=cand_rewards_train[keep],
+                baseline="mean",
+            )
+
 
             a_exec = int(acts[k_best])
 
@@ -1343,9 +1632,16 @@ def main():
                 max_delta=MAX_DELTA_AS,
                 prev_bg=bg_before,
                 occ_mid=occ_mid,
-                update_dual=True,   # ✅ executed action is where you'd update lambda if mode="lag"
+                update_dual=True,   #  executed action is where you'd update lambda if mode="lag"
             )
 
+            abs_err_exec = abs(float(bg_after_exec) - float(target))
+            inband_exec = (abs_err_exec <= float(args.band_mult_as) * float(tol))   # AS
+
+            sig_score_exec = float(agent.reward_cfg.mix) * float(tt_after_exec) + (1.0 - float(agent.reward_cfg.mix)) * float(aa_after_exec)
+            r_train_exec = float(r_exec) + float(args.sig_bonus_as) * float(sig_score_exec) * (1.0 if inband_exec else 0.0)
+
+            
             log_grpo_row(
                 grpo_samples,
                 trigger="AS",
@@ -1370,17 +1666,50 @@ def main():
                 reward_exec=r_exec,
                 executed=1,
                 shielded=int(sd is not None),
+                reward_train = r_train_exec, #exec
+                kept = int(inband_exec) #exec
             )
             micro_global += 1
 
 
-            # IMPORTANT: update GRPO state
+            # update GRPO state
             AS_cut_grpo = cut_next_exec
             prev_bg_as = bg_after_exec
             last_das = das_exec
 
             micro_rewards.append(float(r_exec))
             micro_counter += 1
+
+
+            bg_at_hi = Sing_Trigger(bas_j, as_hi)
+            bg_at_lo = Sing_Trigger(bas_j, as_lo) 
+            if (micro_counter % 100) == 0:
+                print(f"[AS] feasibility: bg@as_hi={bg_at_hi:.4f}  bg@as_lo={bg_at_lo:.4f}  band=[{target-tol:.4f},{target+tol:.4f}]")
+                
+
+                mult = float(args.band_mult_as)
+                lo = target - mult * tol
+                hi = target + mult * tol
+
+                bg_min = float(np.min(cand_bg_after)) if G_sample else float("nan")
+                bg_med = float(np.median(cand_bg_after)) if G_sample else float("nan")
+                bg_max = float(np.max(cand_bg_after)) if G_sample else float("nan")
+
+                cut_min = float(np.min(cand_cut_next)) if G_sample else float("nan")
+                cut_med = float(np.median(cand_cut_next)) if G_sample else float("nan")
+                cut_max = float(np.max(cand_cut_next)) if G_sample else float("nan")
+
+                sig_med = float(np.median(cand_sig)) if G_sample else float("nan")
+                ae_med  = float(np.median(cand_abs_err)) if G_sample else float("nan")
+
+                print(
+                    f"[AS] keep {keep.size}/{G_sample}  "
+                    f"band%=[{lo:.4f},{hi:.4f}]  (kHz=[{lo*RATE_SCALE_KHZ:.1f},{hi*RATE_SCALE_KHZ:.1f}])  "
+                    f"cand_bg% min/med/max={bg_min:.4f}/{bg_med:.4f}/{bg_max:.4f}  "
+                    f"cut_next min/med/max={cut_min:.6f}/{cut_med:.6f}/{cut_max:.6f}  "
+                    f"sig med={sig_med:.3f}  abs_err med={ae_med:.4f}"
+                    f"AS_cut_grpo={AS_cut_grpo:.6f} clip=({as_lo:.6f},{as_hi:.6f})  "
+                )
 
             if micro_counter % int(args.train_every) == 0:
                 loss = agent.update()
@@ -1401,6 +1730,17 @@ def main():
         AS_cut_pd, pre_as_err = PD_controller2(bg_pd_before, pre_as_err, AS_cut_pd)
         AS_cut_pd = float(np.clip(AS_cut_pd, as_lo, as_hi))
         bg_pd = Sing_Trigger(bas, AS_cut_pd)
+
+
+        occ_const = float(near_occupancy(bas, fixed_AS_cut, near_widths_as)[1])
+        occ_pd    = float(near_occupancy(bas, AS_cut_pd,   near_widths_as)[1])
+        occ_dqn   = float(near_occupancy(bas, AS_cut_dqn,  near_widths_as)[1])
+        occ_grpo  = float(near_occupancy(bas, AS_cut_grpo, near_widths_as)[1])
+
+        Occ_const_ad.append(occ_const)
+        Occ_pd_ad.append(occ_pd)
+        Occ_dqn_ad.append(occ_dqn)
+        Occ_grpo_ad.append(occ_grpo)
 
         # --- signal efficiencies for this chunk (same cuts as rates) ---
         tt_const = Sing_Trigger(sas_tt, fixed_AS_cut)
@@ -1432,6 +1772,16 @@ def main():
 
         # --- HT chunk-level logs (ONLY if enabled) ---
         if args.run_ht:
+            occ_const = float(near_occupancy(bht, fixed_Ht_cut, near_widths_ht)[1])
+            occ_pd    = float(near_occupancy(bht, Ht_cut_pd,    near_widths_ht)[1])
+            occ_dqn   = float(near_occupancy(bht, Ht_cut_dqn,   near_widths_ht)[1])
+            occ_grpo  = float(near_occupancy(bht, Ht_cut_grpo,  near_widths_ht)[1])
+
+            Occ_const_ht.append(occ_const)
+            Occ_pd_ht.append(occ_pd)
+            Occ_dqn_ht.append(occ_dqn)
+            Occ_grpo_ht.append(occ_grpo)
+
             bg_ht_const = Sing_Trigger(bht, fixed_Ht_cut)
             bg_ht_grpo  = Sing_Trigger(bht, Ht_cut_grpo)
             bg_ht_dqn   = Sing_Trigger(bht, Ht_cut_dqn)
@@ -1549,7 +1899,7 @@ def main():
         ax.plot(time, rel_to_t0(pid), linewidth=2.2, label="PID")
         ax.plot(time, rel_to_t0(dqn), linewidth=3.0, linestyle=(0, (8, 2, 2, 2)),
                 marker="o", markersize=4, markevery=6, label="DQN")
-        ax.plot(time, rel_to_t0(grpo), linewidth=3.2, linestyle=(0, (10, 2, 2, 2)), label="GRPO")
+        ax.plot(time, rel_to_t0(grpo), linewidth=3.2, linestyle=(0, (10, 2, 2, 2)), label="GFPO")
         ax.set_xlabel("Time (Fraction of Run)")
         ax.set_ylabel(ylabel)
         ax.set_ylim(0.5, 2.5)
@@ -1572,7 +1922,7 @@ def main():
         ax.plot(time, rel_to_t0(cummean(pid)), linewidth=2.2, label="PID")
         ax.plot(time, rel_to_t0(cummean(dqn)), linewidth=3.0, linestyle=(0, (8, 2, 2, 2)),
             marker="o", markersize=4, markevery=6, label="DQN")
-        ax.plot(time, rel_to_t0(cummean(grpo)), linewidth=3.2, linestyle=(0, (10, 2, 2, 2)), label="GRPO")
+        ax.plot(time, rel_to_t0(cummean(grpo)), linewidth=3.2, linestyle=(0, (10, 2, 2, 2)), label="GFPO")
         ax.set_xlabel("Time (Fraction of Run)")
         ax.set_ylabel(ylabel)
         ax.set_ylim(0.5, 2.5)
@@ -1597,7 +1947,7 @@ def main():
         ax.plot(time_ht, R_ht_pd_khz,    linewidth=2.4, label="PID")
         ax.plot(time_ht, R_ht_dqn_khz,   linewidth=3.0, linestyle=(0, (8, 2, 2, 2)),
             marker="o", markersize=4, markevery=6, label="DQN")
-        ax.plot(time_ht, R_ht_grpo_khz,  linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), label="GRPO")
+        ax.plot(time_ht, R_ht_grpo_khz,  linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), label="GFPO")
 
         ax.axhline(upper_tol_khz, linestyle="--", linewidth=1.2)
         ax.axhline(lower_tol_khz, linestyle="--", linewidth=1.2)
@@ -1607,7 +1957,7 @@ def main():
         ax.set_ylabel("Background rate [kHz]")
         ax.set_ylim(0, 200)
         ax.grid(True, linestyle="--", alpha=0.5)
-        ax.legend(loc="best", frameon=True, title="HT Trigger")
+        ax.legend(loc="best", frameon=True, title="HT Trigger", fontsize=9)
         add_cms_header(fig, run_label=run_label)
         finalize_diag_fig(fig)
         save_png(fig, str(outdir / "bht_rate_pidData_grpo"))
@@ -1617,7 +1967,7 @@ def main():
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.plot(time_ht, Cut_ht_pd,   linewidth=2.4, label="PID")
         ax.plot(time_ht, Cut_ht_dqn,  linewidth=2.8, linestyle=(0, (8, 2, 2, 2)), label="DQN")
-        ax.plot(time_ht, Cut_ht_grpo, linewidth=3.0, linestyle=(0, (10, 2, 2, 2)), label="GRPO")
+        ax.plot(time_ht, Cut_ht_grpo, linewidth=3.0, linestyle=(0, (10, 2, 2, 2)), label="GFPO")
         ax.axhline(y=fixed_Ht_cut, color="gray", linestyle="--", linewidth=1.5, label="fixed_Ht_cut")
         ax.set_xlabel("Time (Fraction of Run)")
         ax.set_ylabel("Ht_cut")
@@ -1634,7 +1984,7 @@ def main():
     ax.plot(time, R_pd_khz, linewidth=2.4, label="PID")
     ax.plot(time, R_dqn_khz, linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), marker="o",
             markersize=4, markevery=6, label="DQN")
-    ax.plot(time, R_grpo_khz, linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), label="GRPO")
+    ax.plot(time, R_grpo_khz, linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), label="GFPO")
 
     ax.axhline(upper_tol_khz, linestyle="--", linewidth=1.2)
     ax.axhline(lower_tol_khz, linestyle="--", linewidth=1.2)
@@ -1644,7 +1994,7 @@ def main():
     ax.set_ylabel("Background rate [kHz]")
     ax.set_ylim(0, 200)
     ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True, title="AD Trigger")
+    ax.legend(loc="best", frameon=True, title="AD Trigger", fontsize=9)
     add_cms_header(fig, run_label=run_label)
     finalize_diag_fig(fig)
     save_png(fig, str(outdir / "bas_rate_pidData_grpo"))
@@ -1658,7 +2008,7 @@ def main():
         linewidth=2.8,
         label="DQN",
     )
-    ax.plot(time, Cut_grpo, linewidth=2.4, linestyle=(0, (8, 2, 2, 2)), label="GRPO")
+    ax.plot(time, Cut_grpo, linewidth=2.4, linestyle=(0, (8, 2, 2, 2)), label="GFPO")
     ax.axhline(y=fixed_AS_cut, color="gray", linestyle="--", linewidth=1.5, label="fixed_AS_cut")
     ax.set_xlabel("Time (Fraction of Run)")
     ax.set_ylabel("AD_cut")
@@ -1692,7 +2042,7 @@ def main():
         finalize_diag_fig(fig)
         plt.close(fig)
 
-    # ----------------------------- showcase plots (paper): PD vs DQN vs GRPO -----------------------------
+    # ----------------------------- showcase plots (paper): PD vs DQN vs GFPO -----------------------------
     w = int(args.run_avg_window)
 
     # ===== AD (AS trigger) =====
@@ -1700,13 +2050,13 @@ def main():
         "Constant": R_const_khz,
         "PID":  R_pd_khz,
         "DQN": R_dqn_khz,
-        "GRPO": R_grpo_khz,
+        "GFPO": R_grpo_khz,
     }
     inband_ad = {
         "Constant": (np.abs(R_const_pct - target) <= tol),
         "PID":  (np.abs(R_pd_pct  - target) <= tol),
         "DQN": (np.abs(R_dqn_pct - target) <= tol),
-        "GRPO":(np.abs(R_grpo_pct - target) <= tol),
+        "GFPO":(np.abs(R_grpo_pct - target) <= tol),
     }
     # For Constant cut history, create a flat cut trace of same length
     Cut_const_ad = np.full_like(Cut_pd, fixed_AS_cut, dtype=np.float64)
@@ -1714,14 +2064,14 @@ def main():
         "Constant": Cut_const_ad,
         "PID":  Cut_pd,
         "DQN": Cut_dqn,
-        "GRPO": Cut_grpo,
+        "GFPO": Cut_grpo,
     }
 
     sum_const_ad = summarize_paper_table(R_const_pct, TT_const, AA_const, Cut_const_ad, target, tol)
     sum_pd_ad    = summarize_paper_table(R_pd_pct,    TT_pd,    AA_pd,    Cut_pd,       target, tol)
     sum_dqn_ad   = summarize_paper_table(R_dqn_pct,   TT_dqn,   AA_dqn,   Cut_dqn,      target, tol)
     sum_gr_ad    = summarize_paper_table(R_grpo_pct,  TT_grpo,  AA_grpo,  Cut_grpo,     target, tol)
-    summ_ad = {"Constant": sum_const_ad, "PID": sum_pd_ad, "DQN": sum_dqn_ad, "GRPO": sum_gr_ad}
+    summ_ad = {"Constant": sum_const_ad, "PID": sum_pd_ad, "DQN": sum_dqn_ad, "GFPO": sum_gr_ad}
 
     plot_cdf_abs_err_multi(
         rate_khz_by_method=rate_khz_ad,
@@ -1741,12 +2091,7 @@ def main():
         outpath=plots_dir / "cut_step_hist_ad_const_pd_dqn_grpo",
         run_label=run_label,
     )
-    plot_inband_eff_bars_multi(
-        summary_by_method=summ_ad,
-        title="AD Trigger",
-        outpath=plots_dir / "inband_eff_bars_ad_const_pd_dqn_grpo",
-        run_label=run_label,
-    )
+
 
     # ===== HT trigger (only if enabled) =====
     if args.run_ht:
@@ -1754,27 +2099,27 @@ def main():
             "Constant": R_ht_const_khz,
             "PID":  R_ht_pd_khz,
             "DQN": R_ht_dqn_khz,
-            "GRPO": R_ht_grpo_khz,
+            "GFPO": R_ht_grpo_khz,
         }
         inband_ht = {
             "Constant": (np.abs(R_ht_const_pct - target) <= tol),
             "PID":  (np.abs(R_ht_pd_pct  - target) <= tol),
             "DQN": (np.abs(R_ht_dqn_pct - target) <= tol),
-            "GRPO":(np.abs(R_ht_grpo_pct - target) <= tol),
+            "GFPO":(np.abs(R_ht_grpo_pct - target) <= tol),
         }
         Cut_const_ht = np.full_like(Cut_ht_pd, fixed_Ht_cut, dtype=np.float64)
         cuts_ht = {
             "Constant": Cut_const_ht,
             "PID":  Cut_ht_pd,
             "DQN": Cut_ht_dqn,
-            "GRPO": Cut_ht_grpo,
+            "GFPO": Cut_ht_grpo,
         }
 
         sum_const_ht = summarize_paper_table(R_ht_const_pct, TT_ht_const, AA_ht_const, Cut_const_ht, target, tol)
         sum_pd_ht    = summarize_paper_table(R_ht_pd_pct,    TT_ht_pd,    AA_ht_pd,    Cut_ht_pd,    target, tol)
         sum_dqn_ht   = summarize_paper_table(R_ht_dqn_pct,   TT_ht_dqn,   AA_ht_dqn,   Cut_ht_dqn,   target, tol)
         sum_gr_ht    = summarize_paper_table(R_ht_grpo_pct,  TT_ht_grpo,  AA_ht_grpo,  Cut_ht_grpo,  target, tol)
-        summ_ht = {"Constant": sum_const_ht, "PID": sum_pd_ht, "DQN": sum_dqn_ht, "GRPO": sum_gr_ht}
+        summ_ht = {"Constant": sum_const_ht, "PID": sum_pd_ht, "DQN": sum_dqn_ht, "GFPO": sum_gr_ht}
 
 
         plot_cdf_abs_err_multi(
@@ -1795,12 +2140,12 @@ def main():
             outpath=plots_dir / "cut_step_hist_ht_const_pd_dqn_grpo",
             run_label=run_label,
         )
-        plot_inband_eff_bars_multi(
-            summary_by_method=summ_ht,
-            title="HT Trigger",
-            outpath=plots_dir / "inband_eff_bars_ht_const_pd_dqn_grpo",
-            run_label=run_label,
-        )
+        # plot_inband_eff_bars_multi(
+        #     summary_by_method=summ_ht,
+        #     title="HT Trigger",
+        #     outpath=plots_dir / "inband_eff_bars_ht_const_pd_dqn_grpo",
+        #     run_label=run_label,
+        # )
 
     # ----------------------------- paper summary table (CSV + LaTeX) -----------------------------
     rows = []
@@ -1821,7 +2166,7 @@ def main():
     add_row("AD", "Constant", sum_const_ad)
     add_row("AD", "PID",      sum_pd_ad)
     add_row("AD", "DQN",      sum_dqn_ad)
-    add_row("AD", "GRPO",     sum_gr_ad)
+    add_row("AD", "GFPO",     sum_gr_ad)
 
     # ---- HT rows ----
     if args.run_ht:
@@ -1835,7 +2180,7 @@ def main():
         add_row("HT", "Constant", sum_const_ht)
         add_row("HT", "PID",      sum_pd_ht)
         add_row("HT", "DQN",      sum_dqn_ht)
-        add_row("HT", "GRPO",     sum_gr_ht)
+        add_row("HT", "GFPO",     sum_gr_ht)
 
     out_csv = tables_dir / "single_trigger_compact_summary.csv"
     out_tex = tables_dir / "single_trigger_compact_summary.tex"
@@ -1853,32 +2198,49 @@ def main():
 
     _plot_adv_hist_and_ecdf(
         adv_raw_as,
-        title=f"GRPO Candidate Advantage (AS)  | vanish={frac_vanish_as:.2%}",
+        title=f"GFPO Candidate Advantage (AS)  | vanish={frac_vanish_as:.2%}",
         xlabel=r"$A = r - \mathrm{mean}(r)$",
         outpath_prefix=plots_dir / "adv_as_candidate_raw",
         run_label=run_label,
     )
     _plot_adv_hist_and_ecdf(
         adv_norm_as,
-        title=f"GRPO Candidate Advantage Norm (AS)  | vanish={frac_vanish_as:.2%}",
+        title=f"GFPO Candidate Advantage Norm (AS)  | vanish={frac_vanish_as:.2%}",
         xlabel=r"$\hat A = (r-\mathrm{mean}(r))/\mathrm{std}(r)$",
         outpath_prefix=plots_dir / "adv_as_candidate_norm",
         run_label=run_label,
     )
     _plot_adv_hist_and_ecdf(
         adv_raw_exec_as,
-        title="GRPO Executed Advantage (AS) (post-shield)",
+        title="GFPO Executed Advantage (AS) (post-shield)",
         xlabel=r"$A_{\mathrm{exec}} = r_{\mathrm{exec}} - \mathrm{mean}(r_{\mathrm{cand}})$",
         outpath_prefix=plots_dir / "adv_as_executed_raw",
         run_label=run_label,
     )
     _plot_adv_hist_and_ecdf(
         adv_norm_exec_as,
-        title="GRPO Executed Advantage Norm (AS) (post-shield)",
+        title="GFPO Executed Advantage Norm (AS) (post-shield)",
         xlabel=r"$\hat A_{\mathrm{exec}}$",
         outpath_prefix=plots_dir / "adv_as_executed_norm",
         run_label=run_label,
     )
+    occ_ad = {
+        "Constant": np.asarray(Occ_const_ad, dtype=np.float64),
+        "PID":      np.asarray(Occ_pd_ad,    dtype=np.float64),
+        "DQN":      np.asarray(Occ_dqn_ad,   dtype=np.float64),
+        "GFPO":     np.asarray(Occ_grpo_ad,  dtype=np.float64),
+    }
+    plot_running_occ_multi(
+        time=time, occ_by_method=occ_ad, w=w,
+        title="AD Trigger (near-cut occupancy)", outpath=plots_dir/"running_occ_ad_const_pd_dqn_grpo",
+        run_label=run_label,
+    )
+    plot_occ_hist_multi(
+        occ_by_method=occ_ad,
+        title="AD Trigger (near-cut occupancy)", outpath=plots_dir/"occ_hist_ad_const_pd_dqn_grpo",
+        run_label=run_label,
+    )
+
 
     # HT (optional)
     if args.run_ht:
@@ -1887,32 +2249,74 @@ def main():
 
         _plot_adv_hist_and_ecdf(
             adv_raw_ht,
-            title=f"GRPO Candidate Advantage (HT)  | vanish={frac_vanish_ht:.2%}",
+            title=f"GFPO Candidate Advantage (HT)  | vanish={frac_vanish_ht:.2%}",
             xlabel=r"$A = r - \mathrm{mean}(r)$",
             outpath_prefix=plots_dir / "adv_ht_candidate_raw",
             run_label=run_label,
         )
         _plot_adv_hist_and_ecdf(
             adv_norm_ht,
-            title=f"GRPO Candidate Advantage Norm (HT)  | vanish={frac_vanish_ht:.2%}",
+            title=f"GFPO Candidate Advantage Norm (HT)  | vanish={frac_vanish_ht:.2%}",
             xlabel=r"$\hat A = (r-\mathrm{mean}(r))/\mathrm{std}(r)$",
             outpath_prefix=plots_dir / "adv_ht_candidate_norm",
             run_label=run_label,
         )
         _plot_adv_hist_and_ecdf(
             adv_raw_exec_ht,
-            title="GRPO Executed Advantage (HT) (post-shield)",
+            title="GFPO Executed Advantage (HT) (post-shield)",
             xlabel=r"$A_{\mathrm{exec}}$",
             outpath_prefix=plots_dir / "adv_ht_executed_raw",
             run_label=run_label,
         )
         _plot_adv_hist_and_ecdf(
             adv_norm_exec_ht,
-            title="GRPO Executed Advantage Norm (HT) (post-shield)",
+            title="GFPO Executed Advantage Norm (HT) (post-shield)",
             xlabel=r"$\hat A_{\mathrm{exec}}$",
             outpath_prefix=plots_dir / "adv_ht_executed_norm",
             run_label=run_label,
         )
+
+        # ttbar-only plot: start y from 90.0
+        plot_inband_eff_single_signal_ad_vs_ht(
+            summ_ad, summ_ht,
+            signal_key="tt",
+            signal_label=r"$t\bar{t}$",
+            outpath=plots_dir / "inband_eff_tt_ad_vs_ht",
+            run_label=run_label,
+            ymin=90.0,
+            ymax_pad=2.0,
+            GRPO=False, #GFPO in our setting
+        )
+
+        # h->4b-only plot: start y from 15
+        plot_inband_eff_single_signal_ad_vs_ht(
+            summ_ad, summ_ht,
+            signal_key="h_to_4b",
+            signal_label=r"$h\rightarrow 4b$",
+            outpath=plots_dir / "inband_eff_h4b_ad_vs_ht",
+            run_label=run_label,
+            ymin=15.0,
+            ymax_pad=2.0,
+            GRPO = False, #GFPO in our setting
+        )
+
+        occ_ht = {
+        "Constant": np.asarray(Occ_const_ht, dtype=np.float64),
+        "PID":      np.asarray(Occ_pd_ht,    dtype=np.float64),
+        "DQN":      np.asarray(Occ_dqn_ht,   dtype=np.float64),
+        "GFPO":     np.asarray(Occ_grpo_ht,  dtype=np.float64),
+        }
+        plot_running_occ_multi(
+        time=time_ht, occ_by_method=occ_ht, w=w,
+        title="HT Trigger (near-cut occupancy)", outpath=plots_dir/"running_occ_ht_const_pd_dqn_grpo",
+        run_label=run_label,
+        )
+        plot_occ_hist_multi(
+        occ_by_method=occ_ht,
+        title="HT Trigger (near-cut occupancy)", outpath=plots_dir/"occ_hist_ht_const_pd_dqn_grpo",
+        run_label=run_label,
+        )
+
 
 
     print(f"[OK] Wrote: {out_csv}")

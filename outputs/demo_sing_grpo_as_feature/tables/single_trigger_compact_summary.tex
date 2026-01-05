@@ -5,21 +5,23 @@
 \renewcommand{\arraystretch}{1.10}
 \begin{tabular}{llrrrrrrr}
 \hline
-Trigger & Method & MAE$\downarrow$ & P95$|e|$$\downarrow$ & InBand$\uparrow$ & UpViol$\downarrow$ & TV$\downarrow$ & $t\bar{t}\uparrow$ & $h\rightarrow 4b\uparrow$ \\
-\hline
-\multicolumn{9}{l}{\textbf{AD trigger}} \\
-AD & Constant & 0.164 & 0.216 & 0.016 & \textbf{0.000} & \textbf{0.000} & 90.201 & 17.098 \\
-AD & PID & 0.031 & 0.068 & 0.457 & 1.45e-04 & 94.069 & 93.537 & 22.506 \\
-AD & DQN & 0.015 & 0.034 & 0.823 & 0.001 & 373.500 & \textbf{93.981} & \textbf{22.962} \\
-AD & GRPO & \textbf{0.011} & \textbf{0.032} & \textbf{0.909} & 4.73e-04 & 333.750 & 93.748 & 22.582 \\
+Trigger & Method & MAE$\downarrow$ & P95$|e|$$\downarrow$ & InBand$\uparrow$ & UpFrac$\downarrow$ & DownFrac$\downarrow$ & $t\bar{t}\uparrow$ & $h\rightarrow 4b\uparrow$ \\
 \hline
 \multicolumn{9}{l}{\textbf{HT trigger}} \\
-HT & Constant & 0.179 & 0.236 & 0.016 & \textbf{0.000} & \textbf{0.000} & 94.457 & 18.398 \\
-HT & PID & 0.025 & 0.055 & 0.586 & 1.34e-04 & 181.275 & 97.824 & 24.906 \\
-HT & DQN & 0.014 & 0.034 & 0.855 & 4.30e-05 & 688.000 & 97.946 & 25.741 \\
-HT & GRPO & \textbf{0.011} & \textbf{0.028} & \textbf{0.909} & 1.34e-04 & 503.000 & \textbf{98.066} & \textbf{26.188} \\
+HT & Constant & 0.179 & 0.236 & 0.016 & \textbf{0.000} & 0.984 & 94.457 & 18.398 \\
+HT & PID & 0.025 & 0.055 & 0.586 & 0.016 & 0.398 & 97.824 & 24.906 \\
+HT & DQN & 0.012 & 0.024 & 0.984 & 0.011 & \textbf{0.005} & 98.043 & 26.228 \\
+HT & GRPO & 0.011 & 0.024 & 0.978 & 0.011 & 0.011 & 98.037 & 26.224 \\
+HT & GFPO & \textbf{0.003} & \textbf{0.010} & \textbf{0.989} & 0.005 & 0.005 & \textbf{98.083} & \textbf{26.379} \\
+\hline
+\multicolumn{9}{l}{\textbf{AD trigger}} \\
+AD & Constant & 0.164 & 0.216 & 0.016 & \textbf{0.000} & 0.984 & 90.201 & 17.098 \\
+AD & PID & 0.031 & 0.068 & 0.457 & 0.016 & 0.527 & 93.537 & 22.506 \\
+AD & DQN & 0.011 & 0.024 & 0.984 & 0.000 & 0.016 & 93.704 & 22.659 \\
+AD & GRPO & 0.011 & 0.022 & \textbf{1.000} & 0.000 & \textbf{0.000} & 93.705 & 22.637 \\
+AD & GFPO & \textbf{0.003} & \textbf{0.008} & 1.000 & 0.000 & 0.000 & \textbf{93.814} & \textbf{22.808} \\
 \hline
 \end{tabular}
-\caption{Summary of single-trigger control. Rates are in percent units with target $r^*=0.250\%$ and tolerance $\pm 0.025\%$. InBand is the fraction of chunks within $|r-r^*|\le\tau$. UpViol measures upward band violations. TV is total cut variation. $t\bar t$ and $h\rightarrow 4b$ are mean signal efficiencies conditioned on in-band chunks.}
+\caption{Summary of single-trigger control. Rates are in percent units with target $r^*=0.250\%$ and tolerance $\pm 0.025\%$. InBand is the fraction of chunks within $|r-r^*|\le\tau$. UpFrac and DownFrac measures upward/downward band violations. $t\bar t$ and $h\rightarrow 4b$ are mean signal efficiencies conditioned on in-band chunks.}
 \label{tab:single_trigger_summary_paper}
 \end{table}

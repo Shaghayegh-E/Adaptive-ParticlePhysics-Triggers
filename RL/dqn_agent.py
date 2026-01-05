@@ -17,7 +17,7 @@ from typing import Optional, Sequence, Tuple
 import random
 import numpy as np
 import math
-
+from triggers import Sing_Trigger
 # --- torch import guarded so main script can error nicely if missing ---
 try:
     import torch
@@ -28,6 +28,23 @@ except Exception as e:  # pragma: no cover
         "PyTorch is required.\nInstall: pip install torch\n\n"
         f"Import error: {e}"
     )
+def _tail_shape_features(scores, cut, step, eps=1e-8):
+    """
+    Tail shape above cut using background scores only.
+    Returns 4 scalars: p1, p2, ratio1, ratio2.
+    All in "percent units" consistent with Sing_Trigger outputs.
+    """
+    if step is None or step <= 0:
+        # fallback: no tail info
+        return 0.0, 0.0, 0.0, 0.0
+
+    p0 = float(Sing_Trigger(scores, cut))
+    p1 = float(Sing_Trigger(scores, cut + 1.0 * step))
+    p2 = float(Sing_Trigger(scores, cut + 2.0 * step))
+
+    r1 = p1 / (p0 + eps)
+    r2 = p2 / (p1 + eps)
+    return p1, p2, r1, r2
 
 def _near_cut_fractions(x: np.ndarray, cut: float, widths: Sequence[float]) -> np.ndarray:
     """
@@ -259,6 +276,94 @@ def make_event_seq_ht(
     last_delta,
     max_delta,
     near_widths=(5.0, 10.0, 20.0),
+    step = None,
+    # (optional)
+    tol=None,            # to compute inband
+    err_i=None,          # leaky integral of err (pass from outside)
+    d_bg_d_cut=None,     # sensitivity probe (pass from outside)
+):
+    # 1) downsample/pad raw event streams to length K
+    htK  = _downsample_last_K(bht,  K)
+    npvK = _downsample_last_K(bnpv, K)
+
+    # 2) normalize per-event quantities
+    ht_norm  = (htK - ht_mid) / max(ht_span, 1e-6)
+    # simple npv normalization (center/scale by window stats)
+    npv_mu, npv_sd = float(np.mean(npvK)), float(np.std(npvK) + 1e-6)
+    npv_norm = (npvK - npv_mu) / npv_sd
+
+    cut_norm = (cut - ht_mid) / max(ht_span, 1e-6)
+    dist_norm = (htK - cut) / max(ht_span, 1e-6)
+    pass_flag = (htK >= cut).astype(np.float32)
+
+    # 3) chunk-level scalars broadcast to each timestep
+    err = (bg_rate - target) / max(target, 1e-6)             # rate error (fractional)
+    dbr = (bg_rate - prev_bg_rate) / max(target, 1e-6)       # rate drift
+    abs_err = abs(bg_rate - target) / max(target, 1e-6)
+    inband = 0.0 if tol is None else float(abs(bg_rate - target) <= float(tol))
+
+
+
+    last_d = last_delta / max(max_delta, 1e-6)               # last action
+    tpos = np.linspace(0.0, 1.0, K).astype(np.float32)       # time position inside seq
+
+    # 4) “near cut” indicators: |ht - cut| <= width
+    near_feats = np.stack(
+        [(np.abs(htK - cut) <= float(w)).astype(np.float32) for w in near_widths],
+        axis=1
+    )  # (K, W)
+
+    p1, p2, tr1, tr2 = _tail_shape_features(bht, cut, step)
+
+    err_i = 0.0 if err_i is None else float(err_i)
+    d_bg_d_cut = 0.0 if d_bg_d_cut is None else float(d_bg_d_cut)
+    # 5) base 10 features (K,10)
+    base = np.stack([
+        ht_norm,          # 0
+        npv_norm,         # 1
+        pass_flag,        # 2
+        dist_norm,        # 3
+        np.full(K, err,  dtype=np.float32),     # 4
+        np.full(K, dbr,  dtype=np.float32),     # 5
+        np.full(K, cut_norm, dtype=np.float32), # 6
+        np.full(K, last_d,   dtype=np.float32), # 7
+        tpos,             # 8
+        # np.full(K, target / 100.0, dtype=np.float32), # 8 (optional constant)
+
+        #  “how bad” + feasibility
+        np.full(K, abs_err, dtype=np.float32),   # 9
+        np.full(K, inband, dtype=np.float32),    # 10
+
+        #  NPV regime scalars (scale lightly so magnitudes stay sane)
+        np.full(K, npv_mu / 50.0, dtype=np.float32),  # 11 (choose divisor appropriate for your NPV scale)
+        np.full(K, npv_sd / 20.0, dtype=np.float32),  # 12
+
+        #  tail/shape (already available)
+        np.full(K, float(p1), dtype=np.float32),   # 13
+        np.full(K, float(p2), dtype=np.float32),   # 14
+        np.full(K, float(tr1), dtype=np.float32),  # 15
+        np.full(K, float(tr2), dtype=np.float32),  # 16
+
+        # NEW: optional integrator + sensitivity probe
+        np.full(K, err_i, dtype=np.float32),       # 17
+        np.full(K, d_bg_d_cut, dtype=np.float32),  # 18
+        
+    ], axis=1)
+
+    obs = np.concatenate([base, near_feats], axis=1)  # (K, 10+W)
+    return obs.astype(np.float32)
+
+def make_event_seq_ht_v0(
+    *,
+    bht, bnpv,
+    bg_rate, prev_bg_rate,
+    cut,
+    ht_mid, ht_span,
+    target,
+    K,
+    last_delta,
+    max_delta,
+    near_widths=(5.0, 10.0, 20.0),
 ):
     # 1) downsample/pad raw event streams to length K
     htK  = _downsample_last_K(bht,  K)
@@ -302,8 +407,7 @@ def make_event_seq_ht(
 
     obs = np.concatenate([base, near_feats], axis=1)  # (K, 10+W)
     return obs.astype(np.float32)
-
-def make_event_seq_as(
+def make_event_seq_as_v0(
     *,
     bas, bnpv,
     bg_rate, prev_bg_rate,
@@ -314,6 +418,7 @@ def make_event_seq_as(
     last_delta,
     max_delta,
     near_widths=(0.01, 0.02, 0.05),
+    step = None
 ):
     asK  = _downsample_last_K(bas,  K)
     npvK = _downsample_last_K(bnpv, K)
@@ -336,6 +441,8 @@ def make_event_seq_as(
         near_feats.append((np.abs(asK - cut) <= float(w)).astype(np.float32))
     near_feats = np.stack(near_feats, axis=1)  # (K, W)
 
+    p1, p2, tr1, tr2 = _tail_shape_features(bas, cut, step)
+
     base = np.stack([
         as_norm, pass_flag, dist_norm, npv_norm,
         np.full(K, err, dtype=np.float32),
@@ -349,6 +456,82 @@ def make_event_seq_as(
     obs = np.concatenate([base, near_feats], axis=1)  # (K, 10+W)
     return obs.astype(np.float32)
 
+
+def make_event_seq_as(
+    *,
+    bas, bnpv,
+    bg_rate, prev_bg_rate,
+    cut,
+    as_mid, as_span,
+    target,
+    K,
+    last_delta,
+    max_delta,
+    near_widths=(0.01, 0.02, 0.05),
+    step=None,
+    # (optional)
+    tol=None,
+    err_i=None,
+    d_bg_d_cut=None,
+):
+    asK  = _downsample_last_K(bas,  K)
+    npvK = _downsample_last_K(bnpv, K)
+
+    as_norm = (asK - as_mid) / max(as_span, 1e-6)
+
+    npv_mu, npv_sd = float(np.mean(npvK)), float(np.std(npvK) + 1e-6)
+    npv_norm = (npvK - npv_mu) / npv_sd
+
+    cut_norm  = (cut - as_mid) / max(as_span, 1e-6)
+    dist_norm = (asK - cut) / max(as_span, 1e-6)
+    pass_flag = (asK >= cut).astype(np.float32)
+
+    err  = (bg_rate - target) / max(target, 1e-6)
+    dbr  = (bg_rate - prev_bg_rate) / max(target, 1e-6)
+    abs_err = abs(bg_rate - target) / max(target, 1e-6)
+    inband = 0.0 if tol is None else float(abs(bg_rate - target) <= float(tol))
+
+    last_d = last_delta / max(max_delta, 1e-6)
+    tpos = np.linspace(0.0, 1.0, K).astype(np.float32)
+
+    near_feats = np.stack(
+        [(np.abs(asK - cut) <= float(w)).astype(np.float32) for w in near_widths],
+        axis=1
+    )
+
+    p1, p2, tr1, tr2 = _tail_shape_features(bas, cut, step)
+
+    err_i = 0.0 if err_i is None else float(err_i)
+    d_bg_d_cut = 0.0 if d_bg_d_cut is None else float(d_bg_d_cut)
+
+    base = np.stack([
+        as_norm,
+        pass_flag,
+        dist_norm,
+        npv_norm,
+        np.full(K, err, dtype=np.float32),
+        np.full(K, dbr, dtype=np.float32),
+        np.full(K, cut_norm, dtype=np.float32),
+        np.full(K, last_d, dtype=np.float32),
+        tpos,
+
+        np.full(K, abs_err, dtype=np.float32),
+        np.full(K, inband, dtype=np.float32),
+
+        np.full(K, npv_mu / 50.0, dtype=np.float32),
+        np.full(K, npv_sd / 20.0, dtype=np.float32),
+
+        np.full(K, float(p1), dtype=np.float32),
+        np.full(K, float(p2), dtype=np.float32),
+        np.full(K, float(tr1), dtype=np.float32),
+        np.full(K, float(tr2), dtype=np.float32),
+
+        np.full(K, err_i, dtype=np.float32),
+        np.full(K, d_bg_d_cut, dtype=np.float32),
+    ], axis=1)
+
+    obs = np.concatenate([base, near_feats], axis=1)
+    return obs.astype(np.float32)
 
 def shield_delta(
     bg_rate: float,

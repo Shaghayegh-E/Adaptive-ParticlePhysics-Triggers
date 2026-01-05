@@ -113,30 +113,35 @@ def d_bg_d_cut_norm(scores, cut, step, target):
     p_minus = float(Sing_Trigger(scores, float(cut) - step))
     dp_dcut = (p_plus - p_minus) / (2.0 * step)  # typically negative
     return float(dp_dcut) / max(float(target), 1e-6)
-def _group_advantages_from_grpo_samples(grpo_samples, *, trigger="AS", baseline="mean", eps=1e-8):
+def _group_advantages_from_samples(samples, *, trigger, method,
+                                  baseline="mean",
+                                  reward_key="reward_raw",
+                                  kept_only=False,
+                                  eps=1e-8):
     """
-    Reconstruct GRPO advantages from logged candidate rewards.
+    Reconstruct per-micro-step group-relative advantages.
 
-    Returns:
-      adv_raw_all:   list of (r - baseline)
-      adv_norm_all:  list of (r - baseline) / std
-      adv_raw_exec:  list of executed (r_exec - baseline_of_candidates)
-      adv_norm_exec: list of executed (r_exec - baseline) / std
-      frac_vanish:   fraction of groups with std ~ 0 (vanishing-adv groups)
+    For GRPO: kept_only=False, reward_key="reward_raw" (matches store_group)
+    For GFPO: kept_only=True,  reward_key="reward_train" (matches store_group)
     """
     # Filter rows for this trigger
-    rows = [r for r in grpo_samples if r.get("trigger") == trigger]
-
+    rows = [
+        r for r in samples
+        if r.get("trigger") == trigger and r.get("method", "GRPO") == method
+    ]
     # Group candidate rewards by micro-step
     cand_by_micro = {}
     exec_by_micro = {}  # store executed row (reward_exec)
     for r in rows:
         micro = int(r["micro"])
         if r["phase"] == "candidate":
-            rr = r.get("reward_raw", None)
+            if kept_only and int(r.get("kept", 0)) != 1:
+                continue
+            rr = r.get(reward_key, None)
             if rr is None:
                 continue
             cand_by_micro.setdefault(micro, []).append(float(rr))
+
         elif r["phase"] == "executed":
             # executed reward is stored in reward_exec
             re = r.get("reward_exec", None)
@@ -154,24 +159,17 @@ def _group_advantages_from_grpo_samples(grpo_samples, *, trigger="AS", baseline=
         if rs.size == 0:
             continue
 
-        if baseline == "median":
-            b = float(np.median(rs))
-        else:
-            b = float(np.mean(rs))
-
+        b = float(np.median(rs)) if baseline == "median" else float(np.mean(rs))
         s = float(np.std(rs))
+
         total_groups += 1
         if s < 1e-12:
             vanish_groups += 1
             s = 0.0
 
-        # Candidate advantages
         adv = rs - b
         adv_raw_all.extend(adv.tolist())
-        if s > 0:
-            adv_norm_all.extend((adv / (s + eps)).tolist())
-        else:
-            adv_norm_all.extend(np.zeros_like(adv).tolist())
+        adv_norm_all.extend((adv / (s + eps)).tolist() if s > 0 else np.zeros_like(adv).tolist())
 
         # Executed advantage (compare executed reward to candidate baseline)
         if micro in exec_by_micro:
@@ -182,6 +180,29 @@ def _group_advantages_from_grpo_samples(grpo_samples, *, trigger="AS", baseline=
 
     frac_vanish = (vanish_groups / max(1, total_groups))
     return adv_raw_all, adv_norm_all, adv_raw_exec, adv_norm_exec, frac_vanish
+def _plot_adv_compare_ecdf(x_grpo, x_gfpo, *, title, outpath, run_label):
+    x_grpo = np.asarray(x_grpo, dtype=np.float64); x_grpo = x_grpo[np.isfinite(x_grpo)]
+    x_gfpo = np.asarray(x_gfpo, dtype=np.float64); x_gfpo = x_gfpo[np.isfinite(x_gfpo)]
+    if x_grpo.size == 0 and x_gfpo.size == 0:
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    if x_grpo.size:
+        xs, ys = ecdf(x_grpo)
+        ax.plot(xs, ys, linewidth=2.2, label="GRPO (candidates)")
+    if x_gfpo.size:
+        xs, ys = ecdf(x_gfpo)
+        ax.plot(xs, ys, linewidth=2.2, linestyle=(0, (4, 2)), label="GFPO (kept candidates)")
+
+    ax.set_xlabel(r"Normalized advantage  $\hat A$")
+    ax.set_ylabel("CDF")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.set_title(title)
+    ax.legend(loc="best", frameon=True)
+    add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
+    save_png(fig, str(outpath))
+    plt.close(fig)
 
 
 def _plot_adv_hist_and_ecdf(values, *, title, xlabel, outpath_prefix, run_label):
@@ -268,7 +289,7 @@ def log_grpo_row(rows, *, method="GRPO",
                 bg_before, bg_after,
                 tt_after, aa_after,
                 occ_mid,
-                reward_raw=None, reward_best_sample=None, reward_exec=None,
+                reward_raw=None, reward_train=None, reward_best_sample=None, reward_exec=None,
                 executed=0, shielded=0,
                 kept=0):
     rows.append({
@@ -297,6 +318,7 @@ def log_grpo_row(rows, *, method="GRPO",
         "occ_mid": float(occ_mid),
 
         "reward_raw": (None if reward_raw is None else float(reward_raw)),
+        "reward_train": (None if reward_train is None else float(reward_train)),
         "reward_best_sample": (None if reward_best_sample is None else float(reward_best_sample)),
         "reward_exec": (None if reward_exec is None else float(reward_exec)),
 
@@ -591,9 +613,23 @@ def plot_feasible_ratio_timeseries(stats_grpo, stats_gfpo, *, title, outpath, ru
     fig, ax = plt.subplots(figsize=(9, 5.4))
 
     if stats_grpo is not None:
-        ax.plot(stats_grpo["micros"], stats_grpo["feasible_ratio"], linewidth=2.6, label="GRPO (candidates)")
+        ax.plot(
+            stats_grpo["micros"], stats_grpo["feasible_ratio"],
+            linewidth=2.2,
+            linestyle="-",
+            marker=None,          
+            drawstyle="steps-post",
+            label="GRPO (candidates)",
+        )
     if stats_gfpo is not None:
-        ax.plot(stats_gfpo["micros"], stats_gfpo["feasible_ratio"], linewidth=2.6, linestyle=(0, (4, 2)), label="GFPO (candidates)")
+        ax.plot(
+            stats_gfpo["micros"], stats_gfpo["feasible_ratio"],
+            linewidth=2.2,
+            linestyle=(0, (4, 2)),
+            marker=None,           
+            drawstyle="steps-post",
+            label="GFPO (candidates)",
+        )
 
     ax.set_xlabel("Micro-step")
     ax.set_ylabel(r"Feasible ratio  (#cand with |bg-target|<=tol) / #cand")
@@ -872,6 +908,10 @@ def main():
 
 
     # GFPO (Greedy Feasible Policy Optimization) baseline
+    ap.add_argument("--gfpo-filter", type=str, default="abs_err_topk", choices=["abs_err_topk", "feasible_first_sig"]
+                    , help="abs_err_topk: pick the top-K candidates with the smallest |bg_after - target|, " \
+                        "feasible_first_sig   : feasible-first (|bg-target|<=feas_mult*tol), "
+                        "then rank by mix*tt+(1-mix)*aa; pad with closest if needed")
     ap.add_argument("--group-size-keep", type=int, default=16, choices=[16, 32]) 
     ap.add_argument("--group-size-sample", type=int, default=32)
     ap.add_argument("--no-gfpo", action="store_true", help="disable GFPO baseline")
@@ -884,6 +924,13 @@ def main():
     args = ap.parse_args()
     target = float(args.target)
     use_gfpo = (not args.no_gfpo)
+
+    # --- append gfpo filter to outdir (so runs don't overwrite for GFPO!) ---
+    suffix = args.gfpo_filter if use_gfpo else "nogfpo"
+    outdir_str = str(args.outdir)
+    if not outdir_str.endswith(f"_{suffix}"):
+        args.outdir = f"{outdir_str}_{suffix}"
+    # ------------------------------------------------------------- 
 
 
     if args.group_size_sample < args.group_size_keep: #sample >= keep
@@ -1365,10 +1412,6 @@ def main():
                 sht_tt = Tht[mask_tt]
                 sht_aa = Aht[mask_aa]
 
-
-        # stride = max(500, int(args.inner_stride))
-        # n_micro = max(1, int(np.ceil((end - I) / stride)))
-
         # micro_rewards = []
         # micro_rewards_ht = []   # HT-GRPO executed rewards per micro-step (this chunk)
         micro_stride = max(1, int(args.micro_stride))
@@ -1426,17 +1469,6 @@ def main():
                 if prev_bg_ht_dqn is None:
                     prev_bg_ht_dqn = bg_before_ht_dqn
 
-                # obs_ht_dqn = make_event_seq_ht_v0(
-                #     bht=bht_w, bnpv=bnpv_w_ht,
-                #     bg_rate=bg_before_ht_dqn,
-                #     prev_bg_rate=prev_bg_ht_dqn,
-                #     cut=Ht_cut_dqn,
-                #     ht_mid=ht_mid, ht_span=ht_span,
-                #     target=target, K=K,
-                #     last_delta=last_dht_dqn,
-                #     max_delta=MAX_DELTA_HT,
-                #     near_widths=near_widths_ht,
-                # )
                 err_i_ht_dqn = update_err_i(err_i_ht_dqn, bg_before_ht_dqn, target)
                 dbgcut_ht_dqn = d_bg_d_cut_norm(bht_j, Ht_cut_dqn, HT_STEP, target)
 
@@ -1521,17 +1553,6 @@ def main():
                 if prev_bg_ht is None:
                     prev_bg_ht = bg_before_ht
 
-                # obs_ht = make_event_seq_ht_v0(
-                #     bht=bht_w, bnpv=bnpv_w_ht,
-                #     bg_rate=bg_before_ht,
-                #     prev_bg_rate=prev_bg_ht,
-                #     cut=Ht_cut_grpo,
-                #     ht_mid=ht_mid, ht_span=ht_span,
-                #     target=target, K=K,
-                #     last_delta=last_dht,
-                #     max_delta=MAX_DELTA_HT,
-                #     near_widths=near_widths_ht,
-                # )
                 err_i_ht_grpo = update_err_i(err_i_ht_grpo, bg_before_ht, target)
                 dbgcut_ht_grpo = d_bg_d_cut_norm(bht_j, Ht_cut_grpo, HT_STEP, target)
                 obs_ht = make_event_seq_ht(
@@ -1550,7 +1571,7 @@ def main():
                     d_bg_d_cut = dbgcut_ht_grpo
                 )
 
-                G = int(args.group_size_keep)
+                G = int(args.group_size_keep) #only sample keep size
                 acts_ht, old_logps_ht = agent_ht.sample_group_actions(
                     obs_ht, group_size=G, temperature=float(args.temperature)
                 )
@@ -1685,21 +1706,11 @@ def main():
                 # HT GFPO 
                 # ----- HT GFPO (G_sample -> keep top G_keep) -----
                 if use_gfpo:
+                    micro_id = ht_micro_counter_gfpo
                     bg_before_ht_gfpo = Sing_Trigger(bht_j, Ht_cut_gfpo)
                     if prev_bg_ht_gfpo is None:
                         prev_bg_ht_gfpo = bg_before_ht_gfpo
 
-                    # obs_ht_gfpo = make_event_seq_ht_v0(
-                    #     bht=bht_w, bnpv=bnpv_w_ht,
-                    #     bg_rate=bg_before_ht_gfpo,
-                    #     prev_bg_rate=prev_bg_ht_gfpo,
-                    #     cut=Ht_cut_gfpo,
-                    #     ht_mid=ht_mid, ht_span=ht_span,
-                    #     target=target, K=K,
-                    #     last_delta=last_dht_gfpo,
-                    #     max_delta=MAX_DELTA_HT,
-                    #     near_widths=near_widths_ht,
-                    # )
                     err_i_ht_gfpo = update_err_i(err_i_ht_gfpo, bg_before_ht_gfpo, target)
                     dbgcut_ht_gfpo = d_bg_d_cut_norm(bht_j, Ht_cut_gfpo, HT_STEP, target)
                     obs_ht_gfpo = make_event_seq_ht(
@@ -1726,10 +1737,6 @@ def main():
                         obs_ht_gfpo, group_size=G_sample, temperature=float(args.temperature)
                     )
 
-                    # cand_bg = np.zeros(Gs, dtype=np.float64)
-                    # cand_tt = np.zeros(Gs, dtype=np.float64)
-                    # cand_aa = np.zeros(Gs, dtype=np.float64)
-                    # cand_rw = np.zeros(Gs, dtype=np.float64)
 
                     cand_abs_err_ht = np.zeros(G_sample, dtype=np.float32)
                     cand_sig_ht = np.zeros(G_sample, dtype=np.float32)
@@ -1772,11 +1779,6 @@ def main():
 
                         r_train = float(r) + float(args.sig_bonus) * float(sig_score) * (1.0 if inband else 0.0)
 
-
-                        # cand_bg[k] = bg_after
-                        # cand_tt[k] = tt_after
-                        # cand_aa[k] = aa_after
-                        # cand_rw[k] = r
                         cand_a_ht[k]         = a
                         cand_delta_ht[k]     = dht
                         cand_cut_next_ht[k]  = cut_next
@@ -1790,23 +1792,30 @@ def main():
                         cand_rewards_train_ht[k] = r_train
 
 
-
-                    # keep_idx, feas_count, used_pad = gfpo_topk_keep_indices(
-                    #     cand_bg, cand_tt, cand_aa, cand_rw,
-                    #     target=target, tol=tol,
-                    #     feas_mult=float(args.gfpo_feas_mult),
-                    #     mix=float(args.gfpo_mix),
-                    #     k_keep=Gk,
-                    # )
-
                     # 2) select TOP-G_keep smallest background deviation
-                    order_ht = np.argsort(cand_abs_err_ht)  # ascending abs(bg-target)
-                    keep_ht = order_ht[:min(G_KEEP, G_sample)]
-                    keep_mask_ht = np.zeros(G_sample, dtype=np.bool_)
-                    keep_mask_ht[keep_ht] = True
+                    if args.gfpo_filter == "abs_err_topk":
+                        order_ht = np.argsort(cand_abs_err_ht)  # ascending abs(bg-target)
+                        keep_ht = order_ht[:min(G_KEEP, G_sample)]
+                        keep_mask_ht = np.zeros(G_sample, dtype=np.bool_)
+                        keep_mask_ht[keep_ht] = True
 
-                    # pick executed action as smallest abs_err, tie-break by higher sig
-                    k_best = int(keep_ht[np.lexsort((-cand_sig_ht[keep_ht], cand_abs_err_ht[keep_ht]))][0])
+                        # pick executed action as smallest abs_err, tie-break by higher sig
+                        k_best = int(keep_ht[np.lexsort((-cand_sig_ht[keep_ht], cand_abs_err_ht[keep_ht]))][0])
+                    elif args.gfpo_filter == "feasible_first_sig":
+                        keep_ht, feas_count_ht, used_pad_ht = gfpo_topk_keep_indices(
+                            bg_after=cand_bg_after_ht,
+                            tt_after=cand_tt_after_ht,
+                            aa_after=cand_aa_after_ht,
+                            rewards=cand_rewards_raw_ht,
+                            target=target,
+                            tol=tol,
+                            feas_mult=float(args.gfpo_feas_mult),
+                            mix=float(args.gfpo_mix),
+                            k_keep=min(G_KEEP, G_sample),
+                        )
+                        k_best = int(keep_ht[0])
+                    else:
+                        raise ValueError(f"Unknown --gfpo-filter {args.gfpo_filter}")
 
                     # ---- LOG GFPO candidates (HT) ----
                     keep_set_ht = set(int(x) for x in keep_ht.tolist())
@@ -1816,7 +1825,7 @@ def main():
                         method="GFPO",
                         trigger="HT",
                         chunk=t,
-                        micro=ht_micro_counter_gfpo,
+                        micro=micro_id,
                         micro_global=micro_global,
                         phase="candidate",
                         k=k,
@@ -1836,6 +1845,7 @@ def main():
                         executed=0,
                         shielded=0,
                         kept=int(k in keep_set_ht),
+                        reward_train=float(cand_rewards_train_ht[k])
                         )
 
 
@@ -1855,7 +1865,6 @@ def main():
                         )
 
                     # Train GFPO on kept only train ONLY on kept top-G_KEEP
-                    # gfpo_ht.store_kept_group(obs_ht_gfpo, acts_ht_gfpo, logps_ht_gfpo, cand_rw, keep_idx)
                     gfpo_ht.store_group(
                         obs=obs_ht_gfpo,
                         actions=acts_ht_gfpo[keep_ht],
@@ -1907,7 +1916,7 @@ def main():
                         method="GFPO",
                         trigger="HT",
                         chunk=t,
-                        micro=ht_micro_counter_gfpo,
+                        micro=micro_id,
                         micro_global=micro_global,
                         phase="executed",
                         k=int(k_best),
@@ -1928,11 +1937,10 @@ def main():
                         executed=1,
                         shielded=int(sd is not None),
                         kept=1,
+                        reward_train=float(r_exec)
                     )
 
                     # # Update GFPO policy on its own schedule (use HT micro counter)
-                    # if ht_micro_counter % int(args.train_every) == 0:
-                    #     gfpo_ht.update()
                     if (ht_micro_counter_gfpo % 100) == 0:
                         print(f"[HT GFPO] feasibility: bg@ht_hi={bg_at_hi:.4f}  bg@ht_lo={bg_at_lo:.4f}  band=[{target-tol:.4f},{target+tol:.4f}]")
 
@@ -2001,17 +2009,7 @@ def main():
             tt_after_dqn = Sing_Trigger(sas_tt, cut_next_dqn)
             aa_after_dqn = Sing_Trigger(sas_aa, cut_next_dqn)
 
-            # obs_next_dqn = make_event_seq_as_v0(
-            #     bas=bas_w, bnpv=bnpv_w,
-            #     bg_rate=bg_after_dqn,
-            #     prev_bg_rate=bg_before_dqn,
-            #     cut=cut_next_dqn,
-            #     as_mid=as_mid, as_span=as_span,
-            #     target=target, K=K,
-            #     last_delta=das_dqn,
-            #     max_delta=MAX_DELTA_AS,
-            #     near_widths=near_widths_as,
-            # )
+
             dbgcut_as_next = d_bg_d_cut_norm(bas_j, cut_next_dqn, AS_STEP, target)
 
             obs_next_dqn = make_event_seq_as(
@@ -2060,17 +2058,7 @@ def main():
             if prev_bg_as is None:
                 prev_bg_as = bg_before
 
-            # obs = make_event_seq_as_v0(
-            # bas=bas_w, bnpv=bnpv_w,
-            # bg_rate=bg_before,
-            # prev_bg_rate=prev_bg_as,
-            # cut=AS_cut_grpo,
-            # as_mid=as_mid, as_span=as_span,
-            # target=target, K=K,
-            # last_delta=last_das,
-            # max_delta=MAX_DELTA_AS,
-            # near_widths=near_widths_as,
-            # )
+
             err_i_as_grpo = update_err_i(err_i_as_grpo, bg_before, target)
             dbgcut_as_grpo = d_bg_d_cut_norm(bas_j, AS_cut_grpo, AS_STEP, target)
 
@@ -2224,21 +2212,12 @@ def main():
 
             # ----- AS GFPO (G_sample -> keep top G_keep) -----
             if use_gfpo:
+                micro_id = micro_counter_gfpo
                 bg_before_gfpo = Sing_Trigger(bas_j, AS_cut_gfpo)
                 if prev_bg_gfpo is None:
                     prev_bg_gfpo = bg_before_gfpo
 
-                # obs_gfpo = make_event_seq_as_v0(
-                #     bas=bas_w, bnpv=bnpv_w,
-                #     bg_rate=bg_before_gfpo,
-                #     prev_bg_rate=prev_bg_gfpo,
-                #     cut=AS_cut_gfpo,
-                #     as_mid=as_mid, as_span=as_span,
-                #     target=target, K=K,
-                #     last_delta=last_das_gfpo,
-                #     max_delta=MAX_DELTA_AS,
-                #     near_widths=near_widths_as,
-                # )
+
                 err_i_as_gfpo = update_err_i(err_i_as_gfpo, bg_before_gfpo, target)
                 dbgcut_as_gfpo = d_bg_d_cut_norm(bas_j, AS_cut_gfpo, AS_STEP, target)
 
@@ -2266,10 +2245,6 @@ def main():
                     obs_gfpo, group_size=G_sample, temperature=float(args.temperature)
                 )
 
-                # cand_bg = np.zeros(G_sample, dtype=np.float64)
-                # cand_tt = np.zeros(G_sample, dtype=np.float64)
-                # cand_aa = np.zeros(G_sample, dtype=np.float64)
-                # cand_rw = np.zeros(G_sample, dtype=np.float64)
                 cand_a         = np.zeros(G_sample, dtype=np.int32)
                 cand_delta     = np.zeros(G_sample, dtype=np.float32)
                 cand_cut_next  = np.zeros(G_sample, dtype=np.float32)
@@ -2308,10 +2283,6 @@ def main():
                         update_dual=False,
                     )
 
-                    # cand_bg[k] = bg_after
-                    # cand_tt[k] = tt_after
-                    # cand_aa[k] = aa_after
-                    # cand_rw[k] = r
                     inband = (abs_err <= float(args.band_mult_as) * float(tol))
                     r_train = r + float(args.sig_bonus_as) * sig_score * (1.0 if inband else 0.0)
 
@@ -2329,22 +2300,33 @@ def main():
 
                 
 
-                # keep_idx, feas_count, used_pad = gfpo_topk_keep_indices(
-                #     cand_bg, cand_tt, cand_aa, cand_rw,
-                #     target=target, tol=tol,
-                #     feas_mult=float(args.gfpo_feas_mult),
-                #     mix=float(args.gfpo_mix),
-                #     k_keep=Gk,
-                # )
                 
                 # TOP-G_keep by smallest background deviation
-                order = np.argsort(cand_abs_err)
-                keep = order[:min(G_KEEP, G_sample)]
-                keep_mask = np.zeros(G_sample, dtype=np.bool_)
-                keep_mask[keep] = True
+                if args.gfpo_filter == "abs_err_topk":
+                    order = np.argsort(cand_abs_err)
+                    keep = order[:min(G_KEEP, G_sample)]
+                    keep_mask = np.zeros(G_sample, dtype=np.bool_)
+                    keep_mask[keep] = True
 
-                # AS executed = best among kept (abs_err asc, signal desc tie-break)
-                k_best = int(keep[np.lexsort((-cand_sig[keep], cand_abs_err[keep]))][0])
+                    # AS executed = best among kept (abs_err asc, signal desc tie-break)
+                    k_best = int(keep[np.lexsort((-cand_sig[keep], cand_abs_err[keep]))][0])
+                elif args.gfpo_filter == "feasible_first_sig":
+                    keep, feas_count, used_pad = gfpo_topk_keep_indices(
+                        bg_after=cand_bg_after,
+                        tt_after=cand_tt_after,
+                        aa_after=cand_aa_after,
+                        rewards=cand_rewards_raw,        # tie-breaks
+                        target=target,
+                        tol=tol,
+                        feas_mult=float(args.gfpo_feas_mult),
+                        mix=float(args.gfpo_mix),
+                        k_keep=min(G_KEEP, G_sample),
+                    )
+                    # keep is best-first ranking already; execute the best
+                    k_best = int(keep[0])
+                else:
+                    raise ValueError(f"Unknown --gfpo-filter {args.gfpo_filter}")
+
 
                 # ---- LOG GFPO candidates (AS) ----
                 keep_set = set(int(x) for x in keep.tolist())
@@ -2354,7 +2336,7 @@ def main():
                     method="GFPO",
                     trigger="AS",
                     chunk=t,
-                    micro=micro_counter_gfpo,
+                    micro=micro_id,
                     micro_global=micro_global,
                     phase="candidate",
                     k=k,
@@ -2374,6 +2356,7 @@ def main():
                     executed=0,
                     shielded=0,
                     kept=int(k in keep_set),
+                    reward_train=float(cand_rewards_train[k])
                     )
 
                 # Train on kept only
@@ -2386,12 +2369,6 @@ def main():
                     baseline="mean",
                 )
 
-                # # execute best among kept
-                # k_best = int(keep_idx[0])
-                # a_exec = int(acts_gfpo[k_best])
-                # das_exec = float(AS_DELTAS[a_exec] * AS_STEP)
-
-                # sd = shield_delta(bg_before_gfpo, target, tol, MAX_DELTA_AS)
                 a_exec = int(acts_gfpo[k_best])
 
                 das_exec = float(AS_DELTAS[a_exec] * AS_STEP)
@@ -2429,7 +2406,6 @@ def main():
                 micro_global += 1
 
                 micro_rewards_gfpo.append(float(r_exec)) #HT
-                micro_counter_gfpo += 1
 
                 bg_at_hi = Sing_Trigger(bas_j, as_hi)
                 bg_at_lo = Sing_Trigger(bas_j, as_lo) 
@@ -2440,7 +2416,7 @@ def main():
                     method="GFPO",
                     trigger="AS",
                     chunk=t,
-                    micro=micro_counter_gfpo,
+                    micro=micro_id,
                     micro_global=micro_global,
                     phase="executed",
                     k=int(k_best),
@@ -2491,11 +2467,13 @@ def main():
                     f"AS_cut_grpo={AS_cut_grpo:.6f} clip=({as_lo:.6f},{as_hi:.6f})  "
                     )
 
+                micro_counter_gfpo += 1 
                 # Update GFPO policy on its own schedule AS
                 if micro_counter_gfpo % int(args.train_every) == 0:
                     loss = gfpo_as.update()
                     if loss is not None:
                         gfpo_losses.append(float(loss))
+                
 
         
         # ============================
@@ -3032,37 +3010,37 @@ def main():
     # Note: paper-style normalized advantages use (r - mean)/std. :contentReference[oaicite:1]{index=1}
 
     # AS (AD trigger)
-    adv_raw_as, adv_norm_as, adv_raw_exec_as, adv_norm_exec_as, frac_vanish_as = \
-        _group_advantages_from_grpo_samples(grpo_samples, trigger="AS", baseline="mean")
+    # adv_raw_as, adv_norm_as, adv_raw_exec_as, adv_norm_exec_as, frac_vanish_as = \
+    #     _group_advantages_from_grpo_samples(grpo_samples, trigger="AS", baseline="mean")
 
-    _plot_adv_hist_and_ecdf(
-        adv_raw_as,
-        title=f"GRPO Candidate Advantage (AS)  | vanish={frac_vanish_as:.2%}",
-        xlabel=r"$A = r - \mathrm{mean}(r)$",
-        outpath_prefix=plots_dir / "adv_as_candidate_raw",
-        run_label=run_label,
-    )
-    _plot_adv_hist_and_ecdf(
-        adv_norm_as,
-        title=f"GRPO Candidate Advantage Norm (AS)  | vanish={frac_vanish_as:.2%}",
-        xlabel=r"$\hat A = (r-\mathrm{mean}(r))/\mathrm{std}(r)$",
-        outpath_prefix=plots_dir / "adv_as_candidate_norm",
-        run_label=run_label,
-    )
-    _plot_adv_hist_and_ecdf(
-        adv_raw_exec_as,
-        title="GRPO Executed Advantage (AS) (post-shield)",
-        xlabel=r"$A_{\mathrm{exec}} = r_{\mathrm{exec}} - \mathrm{mean}(r_{\mathrm{cand}})$",
-        outpath_prefix=plots_dir / "adv_as_executed_raw",
-        run_label=run_label,
-    )
-    _plot_adv_hist_and_ecdf(
-        adv_norm_exec_as,
-        title="GRPO Executed Advantage Norm (AS) (post-shield)",
-        xlabel=r"$\hat A_{\mathrm{exec}}$",
-        outpath_prefix=plots_dir / "adv_as_executed_norm",
-        run_label=run_label,
-    )
+    # _plot_adv_hist_and_ecdf(
+    #     adv_raw_as,
+    #     title=f"GRPO Candidate Advantage (AS)  | vanish={frac_vanish_as:.2%}",
+    #     xlabel=r"$A = r - \mathrm{mean}(r)$",
+    #     outpath_prefix=plots_dir / "adv_as_candidate_raw",
+    #     run_label=run_label,
+    # )
+    # _plot_adv_hist_and_ecdf(
+    #     adv_norm_as,
+    #     title=f"GRPO Candidate Advantage Norm (AS)  | vanish={frac_vanish_as:.2%}",
+    #     xlabel=r"$\hat A = (r-\mathrm{mean}(r))/\mathrm{std}(r)$",
+    #     outpath_prefix=plots_dir / "adv_as_candidate_norm",
+    #     run_label=run_label,
+    # )
+    # _plot_adv_hist_and_ecdf(
+    #     adv_raw_exec_as,
+    #     title="GRPO Executed Advantage (AS) (post-shield)",
+    #     xlabel=r"$A_{\mathrm{exec}} = r_{\mathrm{exec}} - \mathrm{mean}(r_{\mathrm{cand}})$",
+    #     outpath_prefix=plots_dir / "adv_as_executed_raw",
+    #     run_label=run_label,
+    # )
+    # _plot_adv_hist_and_ecdf(
+    #     adv_norm_exec_as,
+    #     title="GRPO Executed Advantage Norm (AS) (post-shield)",
+    #     xlabel=r"$\hat A_{\mathrm{exec}}$",
+    #     outpath_prefix=plots_dir / "adv_as_executed_norm",
+    #     run_label=run_label,
+    # )
 
     near_occ_as_grpo = np.asarray(near_occ_as_grpo, dtype=np.float32)  # (Tchunk, W)
 
@@ -3094,56 +3072,81 @@ def main():
     # Feasibility mechanics plots
     # ============================
     # AS
-    as_grpo = compute_feasibility_micro_stats(grpo_samples, trigger="AS", method="GRPO", target=target, tol=tol)
-    as_gfpo = compute_feasibility_micro_stats(grpo_samples, trigger="AS", method="GFPO", target=target, tol=tol)
+    # strict feasibility (paper tol)
+    stats_grpo_as = compute_feasibility_micro_stats(grpo_samples, trigger="AS", method="GRPO", target=target, tol=tol)
+    stats_gfpo_as = compute_feasibility_micro_stats(grpo_samples, trigger="AS", method="GFPO", target=target, tol=tol)
 
-    plot_feasible_ratio_timeseries(
-        as_grpo, as_gfpo,
-        title="AD Trigger (AS)",
-        outpath=plots_dir / "feasible_ratio_timeseries_as_grpo_vs_gfpo",
+    plot_feasible_ratio_timeseries(stats_grpo_as, stats_gfpo_as,
+    title="AD Trigger (strict tol)", outpath=plots_dir/"feasible_ratio_ts_AS", run_label=run_label)
+
+    plot_feasibility_bar(stats_grpo_as, stats_gfpo_as,
+    title="AD Trigger (strict tol)", outpath=plots_dir/"feasibility_bar_AS", run_label=run_label)
+
+
+    # ---- AD / AS trigger ----
+    adv_raw_grpo_as, adv_norm_grpo_as, adv_raw_exec_grpo_as, adv_norm_exec_grpo_as, frac_vanish_grpo_as = _group_advantages_from_samples(
+    grpo_samples, trigger="AS", method="GRPO",
+    baseline="mean", reward_key="reward_raw", kept_only=False
+    )
+    adv_raw_gfpo_as, adv_norm_gfpo_as, adv_raw_exec_gfpo_as, adv_norm_exec_gfpo_as, frac_vanish_gfpo_as = _group_advantages_from_samples(
+    grpo_samples, trigger="AS", method="GFPO",
+    baseline="mean", reward_key="reward_train", kept_only=True  # requires logging reward_train
+    )
+
+    _plot_adv_compare_ecdf(
+    adv_norm_grpo_as, adv_norm_gfpo_as,
+    title="AD trigger: normalized candidate advantages (GRPO vs GFPO)",
+    outpath=plots_dir / "adv_compare_AS_norm_ecdf",
+    run_label=run_label
+    )
+    # Optional: per-method hist+ecdf dumps (normalized)
+    _plot_adv_hist_and_ecdf(
+        adv_norm_grpo_as,
+        title=f"GRPO candidate normalized advantages (AS) | vanish={frac_vanish_grpo_as:.2%}",
+        xlabel=r"Normalized advantage  $\hat A$",
+        outpath_prefix=plots_dir / "adv_AS_GRPO_norm",
         run_label=run_label,
     )
-    plot_feasibility_bar(
-        as_grpo, as_gfpo,
-        title="AD Trigger (AS)",
-        outpath=plots_dir / "feasibility_bar_as_grpo_vs_gfpo",
+    _plot_adv_hist_and_ecdf(
+        adv_norm_gfpo_as,
+        title=f"GFPO kept candidate normalized advantages (AS) | vanish={frac_vanish_gfpo_as:.2%}",
+        xlabel=r"Normalized advantage  $\hat A$",
+        outpath_prefix=plots_dir / "adv_AS_GFPO_norm",
         run_label=run_label,
     )
-
-
     # HT (optional)
     if args.run_ht:
-        adv_raw_ht, adv_norm_ht, adv_raw_exec_ht, adv_norm_exec_ht, frac_vanish_ht = \
-            _group_advantages_from_grpo_samples(grpo_samples, trigger="HT", baseline="mean")
+        # adv_raw_ht, adv_norm_ht, adv_raw_exec_ht, adv_norm_exec_ht, frac_vanish_ht = \
+        #     _group_advantages_from_grpo_samples(grpo_samples, trigger="HT", baseline="mean")
 
-        _plot_adv_hist_and_ecdf(
-            adv_raw_ht,
-            title=f"GRPO Candidate Advantage (HT)  | vanish={frac_vanish_ht:.2%}",
-            xlabel=r"$A = r - \mathrm{mean}(r)$",
-            outpath_prefix=plots_dir / "adv_ht_candidate_raw",
-            run_label=run_label,
-        )
-        _plot_adv_hist_and_ecdf(
-            adv_norm_ht,
-            title=f"GRPO Candidate Advantage Norm (HT)  | vanish={frac_vanish_ht:.2%}",
-            xlabel=r"$\hat A = (r-\mathrm{mean}(r))/\mathrm{std}(r)$",
-            outpath_prefix=plots_dir / "adv_ht_candidate_norm",
-            run_label=run_label,
-        )
-        _plot_adv_hist_and_ecdf(
-            adv_raw_exec_ht,
-            title="GRPO Executed Advantage (HT) (post-shield)",
-            xlabel=r"$A_{\mathrm{exec}}$",
-            outpath_prefix=plots_dir / "adv_ht_executed_raw",
-            run_label=run_label,
-        )
-        _plot_adv_hist_and_ecdf(
-            adv_norm_exec_ht,
-            title="GRPO Executed Advantage Norm (HT) (post-shield)",
-            xlabel=r"$\hat A_{\mathrm{exec}}$",
-            outpath_prefix=plots_dir / "adv_ht_executed_norm",
-            run_label=run_label,
-        )
+        # _plot_adv_hist_and_ecdf(
+        #     adv_raw_ht,
+        #     title=f"GRPO Candidate Advantage (HT)  | vanish={frac_vanish_ht:.2%}",
+        #     xlabel=r"$A = r - \mathrm{mean}(r)$",
+        #     outpath_prefix=plots_dir / "adv_ht_candidate_raw",
+        #     run_label=run_label,
+        # )
+        # _plot_adv_hist_and_ecdf(
+        #     adv_norm_ht,
+        #     title=f"GRPO Candidate Advantage Norm (HT)  | vanish={frac_vanish_ht:.2%}",
+        #     xlabel=r"$\hat A = (r-\mathrm{mean}(r))/\mathrm{std}(r)$",
+        #     outpath_prefix=plots_dir / "adv_ht_candidate_norm",
+        #     run_label=run_label,
+        # )
+        # _plot_adv_hist_and_ecdf(
+        #     adv_raw_exec_ht,
+        #     title="GRPO Executed Advantage (HT) (post-shield)",
+        #     xlabel=r"$A_{\mathrm{exec}}$",
+        #     outpath_prefix=plots_dir / "adv_ht_executed_raw",
+        #     run_label=run_label,
+        # )
+        # _plot_adv_hist_and_ecdf(
+        #     adv_norm_exec_ht,
+        #     title="GRPO Executed Advantage Norm (HT) (post-shield)",
+        #     xlabel=r"$\hat A_{\mathrm{exec}}$",
+        #     outpath_prefix=plots_dir / "adv_ht_executed_norm",
+        #     run_label=run_label,
+        # )
 
         # ttbar-only plot: start y from 90
         plot_inband_eff_single_signal_ad_vs_ht(
@@ -3183,25 +3186,59 @@ def main():
             plt.close(fig)
         
 
-        ht_grpo = compute_feasibility_micro_stats(grpo_samples, trigger="HT", method="GRPO", target=target, tol=tol)
-        ht_gfpo = compute_feasibility_micro_stats(grpo_samples, trigger="HT", method="GFPO", target=target, tol=tol)
+        stats_grpo_ht = compute_feasibility_micro_stats(grpo_samples, trigger="HT", method="GRPO", target=target, tol=tol)
+        stats_gfpo_ht = compute_feasibility_micro_stats(grpo_samples, trigger="HT", method="GFPO", target=target, tol=tol)
 
-        plot_feasible_ratio_timeseries(
-            ht_grpo, ht_gfpo,
-            title="HT Trigger",
-            outpath=plots_dir / "feasible_ratio_timeseries_ht_grpo_vs_gfpo",
-            run_label=run_label,
+        plot_feasible_ratio_timeseries(stats_grpo_ht, stats_gfpo_ht,
+        title="HT Trigger (strict tol)", outpath=plots_dir/"feasible_ratio_ts_HT", run_label=run_label)
+
+        plot_feasibility_bar(stats_grpo_ht, stats_gfpo_ht,
+        title="HT Trigger (strict tol)", outpath=plots_dir/"feasibility_bar_HT", run_label=run_label)
+
+
+        adv_raw_grpo_ht, adv_norm_grpo_ht, *_ = _group_advantages_from_samples(
+            grpo_samples, trigger="HT", method="GRPO",
+            baseline="mean", reward_key="reward_raw", kept_only=False
         )
-        plot_feasibility_bar(
-            ht_grpo, ht_gfpo,
-            title="HT Trigger",
-            outpath=plots_dir / "feasibility_bar_ht_grpo_vs_gfpo",
-            run_label=run_label,
+        adv_raw_gfpo_ht, adv_norm_gfpo_ht, *_ = _group_advantages_from_samples(
+        grpo_samples, trigger="HT", method="GFPO",
+        baseline="mean", reward_key="reward_train", kept_only=True
+        )
+
+        _plot_adv_compare_ecdf(
+        adv_norm_grpo_ht, adv_norm_gfpo_ht,
+        title="HT trigger: normalized candidate advantages (GRPO vs GFPO)",
+        outpath=plots_dir / "adv_compare_HT_norm_ecdf",
+        run_label=run_label
         )
 
 
     print(f"[OK] Wrote: {out_csv}")
     print(f"[OK] Wrote: {out_tex}")
+
+    # ============================
+    # Quick console summary (helps “GFPO more feasible than GRPO” claim)
+    # ============================
+    def _print_stats(name, st):
+        if st is None:
+            print(f"[{name}] (no stats)")
+            return
+        print(
+            f"[{name}] cand_feas_mean={st['feasible_ratio_mean']:.3f}  "
+            f"kept_feas_mean={st.get('kept_feasible_ratio_mean', float('nan')):.3f}  "
+            f"exec_feas_rate={st.get('exec_feasible_rate', float('nan')):.3f}  "
+            f"pad_rate={st.get('pad_rate', float('nan')):.3f}  "
+            f"shield_rate={st.get('shield_rate', float('nan')):.3f}"
+        )
+
+    print("\n=== Feasibility summary (strict tol) ===")
+    _print_stats("AS GRPO", stats_grpo_as)
+    _print_stats("AS GFPO", stats_gfpo_as)
+    if args.run_ht:
+        _print_stats("HT GRPO", stats_grpo_ht)
+        _print_stats("HT GFPO", stats_gfpo_ht)
+
+    print(f"[DONE] outputs in: {outdir}")
 
 
 
