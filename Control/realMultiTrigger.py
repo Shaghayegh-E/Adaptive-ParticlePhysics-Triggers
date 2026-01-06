@@ -49,17 +49,17 @@ def main():
     #p.add_argument("--chunk", type=int, default=50000)
     #p.add_argument("--n_bins", type=int, default=25)
     p.add_argument("--outdir", default="outputs/demo_RealMultiTrigger_mc")
-    p.add_argument("--costRef", type=float, nargs="+", default=[5.6,2.7])
+    p.add_argument("--costRef", type=float, nargs="+", default=[5.7, 2.5])
     p.add_argument("--forceCostRef", action="store_true")
 
     args = p.parse_args()
     
     if args.bkgType=="RealData":
         chunk_size = 20000
-        CostRef = [4.3, 2.9]
+        CostRef = [4.3, 3.5]
     else :
         chunk_size = 50000
-        CostRef = [5.6, 2.7]
+        CostRef = [5.7, 2.5]
         
     if args.forceCostRef : CostRef = args.costRef
     

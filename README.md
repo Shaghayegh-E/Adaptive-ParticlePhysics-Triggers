@@ -151,19 +151,20 @@ python3 -m SampleProcessing.derived_info.build_trigger_food --bkgType=RealData
 ### Single-path demo (PD controller on HT & AD)
 #### use --bkgType=MC or RealData (default=MC)
 ```
-python3 -m Control.mc_singletrigger --bkgType=RealData
-python3 -m Control.mc_singletrigger_plots --bkgType=RealData
+python3 -m Control.Singletrigger --bkgType=RealData
+python3 -m Control.Singletrigger_plots --bkgType=RealData
 ```
 ### Multi Trigger Control Framework Case 1/2/3
 #### Running CompCost_Eval reports reference cost parameters for Case 3 
 ### (default: MC)
 ```
 python3 -m Control.IdealMultiTrigger --agent v1 --bkgType=MC --path "Data/Trigger_food_MC.h5" \
---outdir "outputs/demo_IdealMultiTrigger_mc"
+--outdir outputs/demo_IdealMultiTrigger_mc
 
 python3 -m Control.IdealMultiTrigger --agent v2
 
-python3 -m Control.CompCost_Eval --bkgType=MC  --path Data/Trigger_food_MC.h5
+python3 -m Control.CompCost_Eval --bkgType=MC  --path Data/Trigger_food_MC.h5\
+--outdir outputs/demo_IdealMultiTrigger_mc
 python3 -m Control.IdealMultiTrigger --agent v3 --costRef 5.6 2.7 --forceCostRef
 ```
 
@@ -194,7 +195,7 @@ python3 -m Control.summary --bkgType=MC --path Data/Trigger_food_MC.h5 \
 --out outputs/SummaryPanels_MC.pdf
 
 python3 -m Control.summary --bkgType=RealData --path Data/Trigger_food_Data.h5 \
---out outputs/SummaryPanels_Data.pdf
+--out outputs/SummaryPanels_Data.pdf --bins 7
 
 ```
 

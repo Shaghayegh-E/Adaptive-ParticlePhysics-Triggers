@@ -72,6 +72,8 @@ def V1(bht, sht1, sht2, bas, sas1, sas2):
     s1_overlap = 100 * (s1_both_count+1e-10) / (s1_accepted_events+1e-10)
     s2_overlap = 100 * (s2_both_count+1e-10) / (s2_accepted_events+1e-10)
     
+
+    
     # Additional rates if needed
     r_bht = 100 * b_ht_count / bht.shape[0]
     r_bas = 100 * b_as_count / bht.shape[0]
@@ -90,7 +92,7 @@ def V1(bht, sht1, sht2, bas, sas1, sas2):
     cost = (a[0]*np.abs(r_b - t_b)) + (a[1] *np.abs(total_s_rate - 100))
     log_Cost = np.log10(cost.clip(min=1e-10))
     
-    return log_Cost, r_b, r1_s, r2_s, r_bht, r_bas, r1_sht, r2_sht, r1_sas, r2_sas, HT, AS
+    return log_Cost, r_b, r1_s, r2_s , r_bht, r_bas, r1_sht, r2_sht, r1_sas, r2_sas, HT, AS
 
 
 def V2(bht, sht1, sht2, bas, sas1, sas2):
@@ -589,7 +591,7 @@ def Trigger(bht_, sht1_, sht2_, bas_, sas1_, sas2_, bnjets ,ht_cut, as_cut):
     # Calculate the number of accepted signal events
     s1_accepted_events = np.sum(s1_accepted_ht) + np.sum(s1_accepted_as) - np.sum(s1_accepted_ht & s1_accepted_as)
     s2_accepted_events = np.sum(s2_accepted_ht) + np.sum(s2_accepted_as) - np.sum(s2_accepted_ht & s2_accepted_as)
-    
+
     # Calculate the number of accepted background events
     b_accepted_events = np.sum(b_accepted_ht) + np.sum(b_accepted_as) - np.sum(b_accepted_ht & b_accepted_as)
             

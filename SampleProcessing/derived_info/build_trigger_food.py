@@ -24,6 +24,21 @@ from .data_io import write_trigger_food
 # Helpers
 # -------------------------
 
+def set_all_seeds(seed: int):
+    """Helpers to set all random seeds for reproducibility."""
+    import random, numpy as np, tensorflow as tf
+    from tensorflow import keras
+    from keras.layers import Dense, Flatten, Reshape, InputLayer
+    from keras.models import Sequential
+    import random
+    from sklearn.model_selection import train_test_split
+
+
+    np.random.seed(seed)
+    random.seed(seed)
+    tf.random.set_seed(seed)
+
+
 def ensure_parent_dir(path_like: str) -> None:
     p = Path(path_like)
     if p.parent and str(p.parent) != "":
@@ -146,23 +161,23 @@ def add_cms_header(fig, left_x=0.13, right_x=0.90, y=0.95):
 
 def _match_to_data(data_npvs, sig_ht, sig_score, sig_npvs, sig_njets):
         order = np.argsort(sig_npvs)
-        sig_ht = sig_ht[order]
-        sig_score = sig_score[order]
-        sig_npvs = sig_npvs[order]
-        sig_njets = sig_njets[order]
+        sig_ht_ = sig_ht[order]
+        sig_score_ = sig_score[order]
+        sig_npvs_ = sig_npvs[order]
+        sig_njets_ = sig_njets[order]
 
         m_ht, m_sc, m_npv, m_nj = [], [], [], []
         for npv in data_npvs:
-            L = np.searchsorted(sig_npvs, npv, side="left")
-            R = np.searchsorted(sig_npvs, npv, side="right")
-            if L >= len(sig_npvs):
-                idx = len(sig_npvs) - 1
+            L = np.searchsorted(sig_npvs_, npv, side="left")
+            R = np.searchsorted(sig_npvs_, npv, side="right")
+            if L >= len(sig_npvs_):
+                idx = len(sig_npvs_) - 1
             elif L == R:
                 idx = L
             else:
                 idx = np.random.randint(L, R)
-            m_ht.append(sig_ht[idx]); m_sc.append(sig_score[idx])
-            m_npv.append(sig_npvs[idx]); m_nj.append(sig_njets[idx])
+            m_ht.append(sig_ht_[idx]); m_sc.append(sig_score_[idx])
+            m_npv.append(sig_npvs_[idx]); m_nj.append(sig_njets_[idx])
         return np.array(m_ht), np.array(m_sc), np.array(m_npv), np.array(m_nj)
 
 
@@ -200,11 +215,12 @@ def run_pipeline(
     X_bkg = jets_npv_to_X(bkg_jets, bkg_npv)
     X_aa  = jets_npv_to_X(aa_jets,  aa_npv)
     X_tt  = jets_npv_to_X(tt_jets,  tt_npv)
+    
+    
 
     bkg_score = ae_mse_scores(ae, X_bkg)
     aa_score  = ae_mse_scores(ae, X_aa)
     tt_score  = ae_mse_scores(ae, X_tt)
-
     
     score_key = f"score{ae_dim:02d}"  # e.g. score02
 
@@ -234,24 +250,22 @@ def run_pipeline(
         arrays["aa_ht"], arrays[f"aa_{score_key}"], arrays["aa_Npv"], arrays["aa_njet"] = _match_to_data(
         arrays["bkg_Npv"], arrays["aa_ht"], arrays[f"aa_{score_key}"], arrays["aa_Npv"], arrays["aa_njet"]
         )
-    
 
-    
 
     ensure_parent_dir(out_path)
     write_trigger_food(out_path, arrays)
     print(f"[OK] Wrote Trigger_food to {out_path} (AE dim={ae_dim})")
     # --- plot anomaly score distributions for the above file ---
-    plot_anomaly_score_distribution(
-        h5_path=out_path,
-        bkgType=bkgType,
-        ae_dim=ae_dim,
-        out_dir=str(Path(out_path).parent),  # save next to the H5
-        cut_quantile=99.75,
-        max_points=300_000,   # downsample if huge
-        bins=90,
-        show=True,            # set False on headless machines
-    )
+    # plot_anomaly_score_distribution(
+         # h5_path=out_path,
+        # bkgType=bkgType,
+        # ae_dim=ae_dim,
+        # out_dir=str(Path(out_path).parent),  # save next to the H5
+        # cut_quantile=99.75,
+        # max_points=300_000,   # downsample if huge
+        # bins=90,
+        # show=True,            # set False on headless machines
+    # )
 
 
 # -------------------------
@@ -279,7 +293,7 @@ def build_argparser() -> argparse.ArgumentParser:
     # Outputs
     p.add_argument("--out", default="Data/Trigger_food_MC.h5")
     p.add_argument("--ae_path", default="SampleProcessing/models/autoencoder_model_mc_2.keras")
-    p.add_argument("--force_ae_path", default=False)
+    p.add_argument("--force_ae_path", action="store_true")
     #p.add_argument("--out-paired", default="Data/Matched_data_2016.h5")
 
     return p
@@ -304,6 +318,8 @@ def main():
         
     if args.force_ae_path :
         ae_path_string = args.ae_path
+        
+    set_all_seeds(20251208)
 
     run_pipeline(
         bkgType=args.bkgType,

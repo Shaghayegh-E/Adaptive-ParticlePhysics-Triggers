@@ -167,6 +167,7 @@ def run_summary_stream(
         for case, agent in local_agents.items():
             _, agent = pick_agent(case)
             ht_cut = cuts[case]['Ht']; as_cut = cuts[case]['AS']
+
             r_b, r_s, _, _, _, _, Ecost, Tcost = Trigger(
                 bht_c,sht1,sht2, bas_c,sas1, sas2, bnjets_c, ht_cut, as_cut
             )
@@ -312,17 +313,17 @@ def main():
     ap.add_argument("--path", default="Data/Trigger_food_MC.h5")
     ap.add_argument("--out", default="outputs/SummaryPanels_MC.pdf")
     ap.add_argument("--bins", type=int, default=10)
-    ap.add_argument("--costRef", type=float, nargs="+", default=[5.6,2.7])
+    ap.add_argument("--costRef", type=float, nargs="+", default=[5.7, 2.5])
     ap.add_argument("--forceCostRef", action="store_true")
 
     args = ap.parse_args()
     
     if args.bkgType=="RealData":
         chunk_size = 20000
-        CostRef = [4.3, 2.9]
+        CostRef = [4.3, 3.5]
     else :
         chunk_size = 50000
-        CostRef = [5.6, 2.7]
+        CostRef = [5.7, 2.5]
         
     if args.forceCostRef : CostRef = args.costRef
     

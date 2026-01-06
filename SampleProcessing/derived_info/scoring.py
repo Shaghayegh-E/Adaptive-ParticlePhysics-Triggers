@@ -29,7 +29,8 @@ def calculate_batch_loss(autoencoder, images: np.ndarray) -> np.ndarray:
     recon = autoencoder.predict(images, verbose=0)
     if recon.shape != images.shape:
         raise ValueError(f"Shape mismatch: recon {recon.shape} vs images {images.shape}")
-    return np.mean((images - recon) ** 2, axis=(1, 2))
+    return np.mean((images - recon) ** 2, axis=1)
+
 
 def calculate_H_met(events: np.ndarray, ht_values: np.ndarray) -> np.ndarray:
     """

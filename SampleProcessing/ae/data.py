@@ -248,26 +248,29 @@ def process_h5_file_Data(input_filename):
         #Ht_values = h5_file['ht'][:]
         
         
-
-        Ht_values = np.zeros(n_selected)  # <- make sure this is before the for loop
+        sorted_data_array = data_array
+        _sort_by_pt_desc_inplace(sorted_data_array)
+        
+        Ht_values = np.zeros(n_selected) 
 
         for i in range(n_selected):
             ht = 0
             for j in range(n_jets):
-                pt = data_array[i, j, 2]
-                eta = data_array[i, j, 0] - 5  # Undo shift
+                pt = sorted_data_array[i, j, 2]
+                eta = sorted_data_array[i, j, 0] - 5  # Undo shift
                 if pt > 20 and abs(eta) < 2.5:
                     ht += pt
                 else:
                     # Mask bad jets
-                    data_array[i, j, 2] = 0.0
-                    data_array[i, j, 0] = -1
-                    data_array[i, j, 1] = -1
+                    sorted_data_array[i, j, 2] = 0.0
+                    sorted_data_array[i, j, 0] = -1
+                    sorted_data_array[i, j, 1] = -1
+                
             Ht_values[i] = ht
-  
-  
-        sorted_data_array = data_array
-        _sort_by_pt_desc_inplace(sorted_data_array)
+
+
+        
+        #_sort_by_pt_desc_inplace(sorted_data_array) #it's a choice to resort it again or no
 
         
         # Remove entries where npv == 0

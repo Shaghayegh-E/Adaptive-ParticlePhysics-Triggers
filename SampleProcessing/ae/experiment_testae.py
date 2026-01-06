@@ -5,11 +5,9 @@ from tensorflow import keras
 from keras.layers import Dense, Flatten, Reshape, InputLayer
 from keras.models import Sequential
 import argparse
-import numpy as np
 import random
 from sklearn.model_selection import train_test_split
 import tensorflow as tf
-from tensorflow import keras
 import os
 from .data import load_bkg_aa_tt #new readin H5 files
 from .models import build_autoencoder_data # the AE model with RELU
@@ -39,6 +37,14 @@ DEFAULT_MODEL_DIR = PKG_ROOT / "models"           # .../SampleProcessing/models
 # ----------------------------
 def set_all_seeds(seed: int):
     """Helpers to set all random seeds for reproducibility."""
+    import random, numpy as np, tensorflow as tf
+    from tensorflow import keras
+    from keras.layers import Dense, Flatten, Reshape, InputLayer
+    from keras.models import Sequential
+    import random
+    from sklearn.model_selection import train_test_split
+
+
     np.random.seed(seed)
     random.seed(seed)
     tf.random.set_seed(seed)
@@ -82,7 +88,6 @@ def train_one_dim(X_train, X_val, img_shape, code_dim, loss_name="mse", lr = 2e-
         epochs=100,
         callbacks=[es],
         #verbose=0,
-        shuffle=True,
     )
     return ae
 
@@ -124,14 +129,18 @@ def run_experiment(args):
     HT_TT  = np.asarray(tt_ht)
 
     print("[SHAPES] X_bkg:", X_bkg.shape, "X_AA:", X_AA.shape, "X_TT:", X_TT.shape)
+    
+    N_total = len(X_bkg)
 
-    # ---- Train/test split for background ----
-    # Keep semantics:
-    #  - RealData: HT baseline is percentile of HT_test 
-    #  - MC:       HT baseline is percentile of HT_bkg full 
-    X_tr, X_te, HT_tr, HT_te = train_test_split(
-        X_bkg, HT_bkg, test_size=0.2, random_state=40, shuffle=True
-    )
+    indices = np.arange(N_total)
+    np.random.shuffle(indices)
+    #folds = np.array_split(indices, K)
+
+    X_bkg   = X_bkg[indices]
+    HT_bkg  = HT_bkg[indices]
+    
+
+    X_tr, X_te, HT_tr, HT_te = train_test_split(X_bkg, HT_bkg, test_size=0.2, random_state=40)
 
     img_shape = X_tr.shape[1:]  # (25,)
 
@@ -144,7 +153,7 @@ def run_experiment(args):
     print("AA_HTPath_passed:", AA_ht_pass)
     print("TT_HTPath_passed:", TT_ht_pass)
 
-    # ---- AE sweep over dims (default [2]) ----
+    # ---- AE sweep over dims  ----
     aa_rates, tt_rates = [], []
     aa_ex_rates, tt_ex_rates = [], []
     
@@ -159,14 +168,9 @@ def run_experiment(args):
 
     for d in args.dims:
         print(f"\n=== Training ReLU autoencoder dim={d} (bkgType={args.bkgType}) ===")
+        #set_all_seeds(args.seed)
         ae = train_one_dim(X_tr, X_te, img_shape, code_dim=d, loss_name=args.loss)
 
-        # save selected dims (default [2]) for BOTH MC and RealData
-        if d in args.save_model_dims:
-            os.makedirs(args.model_out_dir, exist_ok=True)
-            save_path = os.path.join(args.model_out_dir, f"{args.model_prefix}{d}.keras")
-            print(f"Saving autoencoder dim={d} to {save_path}")
-            ae.save(save_path)
 
         # scores
         bkg_scores = batch_mse_scores(ae, X_te)
@@ -208,6 +212,24 @@ def run_experiment(args):
             outbase=args.out_hist,
             title_suffix=""
             )
+        
+        # save selected dims (default [2]) for BOTH MC and RealData
+        if d in args.save_model_dims:
+            os.makedirs(args.model_out_dir, exist_ok=True)
+
+            np.savez_compressed(
+                os.path.join(args.model_out_dir, f"scores_{args.model_prefix}{d}.npz"),
+                bkg=bkg_scores,
+                AA=aa_scores,
+                TT=tt_scores,
+                bkgHT=HT_te,
+                AAHT=HT_AA,
+                TTHT=HT_TT,
+            )
+            save_path = os.path.join(args.model_out_dir, f"{args.model_prefix}{d}.keras")
+            print(f"Saving autoencoder dim={d} to {save_path}")
+            ae.save(save_path)
+
 
     # ---- Efficiency vs dim plot ----
     

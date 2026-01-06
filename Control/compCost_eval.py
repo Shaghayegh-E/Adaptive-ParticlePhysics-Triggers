@@ -39,6 +39,10 @@ def main():
     Sas2, Sht2, Snpv2, Snj2,\
     Bas,  Bht,  Bnpv, Bnj = load_trigger_food(args.path)
     
+    
+
+    
+    
     Nb = len(Bnpv)
 
     
