@@ -9,11 +9,11 @@ import mplhep as hep
 hep.style.use("CMS")
 
 import os
-from .Trigger_io import load_trigger_food
+from .trigger_io import load_trigger_food
 from .agents import V3, V1, V2
 
 from .metrics import update_accumulated
-from .Trigger_io import multi_path_panels, save_subplot, evolution
+from .trigger_io import multi_path_panels, save_subplot, evolution
 
 def pick_agent(name: str):
     name = name.lower()

@@ -8,7 +8,7 @@ import os
 
 from .agents import V3, local_V3, V1, local_V1, V2, local_V2, Trigger
 from .metrics import update_accumulated, average_perf_bins
-from .Trigger_io import rate_efficiency_panels, evolution, load_trigger_food
+from .trigger_io import rate_efficiency_panels, evolution, load_trigger_food
 
 def pick_agent(name: str):
     name = name.lower()

@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 from typing import Dict, Tuple, Callable
 
-from .Trigger_io import load_trigger_food
+from .trigger_io import load_trigger_food
 
 from .agents import V3, local_V3, V1, local_V1, V2, local_V2, Trigger
 import mplhep as hep

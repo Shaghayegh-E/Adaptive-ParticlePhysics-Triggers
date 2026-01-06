@@ -11,7 +11,7 @@ import numpy as np
 import argparse
 from controllers import PD_controller1, PD_controller2
 from triggers import Sing_Trigger
-from .Trigger_io import read_mc_data
+from .trigger_io import read_mc_data
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 

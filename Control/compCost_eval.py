@@ -9,7 +9,7 @@ import mplhep as hep
 hep.style.use("CMS")
 
 import os
-from .Trigger_io import load_trigger_food
+from .trigger_io import load_trigger_food
 
 from .metrics import comp_cost_test
 
