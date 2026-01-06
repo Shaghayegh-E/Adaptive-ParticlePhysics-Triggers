@@ -6,11 +6,10 @@ from keras.layers import Dense, Flatten, Reshape, InputLayer, Lambda, MultiHeadA
 from keras.models import Sequential, Model
 
 
-@keras.utils.register_keras_serializable()
 def select_first_25(x):
     return x[:, :25]
 
-@keras.utils.register_keras_serializable()
+
 def repeat_last_element(x):
     last = tf.expand_dims(x[:, -1], axis=-1)
     rep = tf.repeat(last, 8, axis=-1)
@@ -47,7 +46,7 @@ def build_attention_autoencoder_jet(img_shape, code_size, num_heads=1) -> keras.
 
 
 
-####V2 autoencoder training ####
+####Main autoencoder training ####
 def build_autoencoder_data(img_shape, code_size):
     "Adding RELU activations to the AE model. Making it non-linear otherwise AE just PCA as linear encoder and decoder. MSE, Single hidden bottleneck layer AE and data is mean-centered as PCA assumes centering."
     # The encoder

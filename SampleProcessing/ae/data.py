@@ -51,40 +51,6 @@ def process_h5_file_full(input_filename: str) -> tuple[np.ndarray, np.ndarray]:
     return jets, ht
 
 
-def split_minbias_for_training(
-    jets_full: np.ndarray, ht_full: np.ndarray, stride: int = 100
-):
-    """
-    Mimics original selection:
-      X = jets_full[::stride]
-      Npv = jets_full[::stride, 0, 3]
-      JetsOnly = jets_full[::stride, :, :-1]
-      HT = ht_full[::stride]
-    """
-    X = jets_full[::stride]
-    Npv = X[:, 0, 3]
-    Jets = X[:, :, :-1]
-    HT = ht_full[::stride]
-    return X, Jets, Npv, HT
-
-
-
-### This is for Real Data (Giovanna's Data_testAE.py) ###
-
-def sort_obj0(data_):
-    """
-    Sort jets in descending pt, same as in Data_testAE.py.
-    data_: (N, 8, 4)  [eta, phi, pt, Npv]
-    """
-    for index in np.arange(data_.shape[0]):
-        ele = data_[index, :, :]
-        ele = ele.T
-        sorted_indices = np.argsort(ele[2])[::-1]
-        sorted_array = ele[:, sorted_indices]
-        sorted_array = sorted_array.T
-        data_[index, :, :] = sorted_array
-    return data_
-
 def process_h5_file0(input_filename, use_manual_ht=True):
     """
     Generalized version of process_h5_file0 in Data_testAE.py.
@@ -240,10 +206,10 @@ def process_h5_file_full_data(input_filename: str) -> tuple[np.ndarray, np.ndarr
         return sorted_data_array, Ht_values
 
 
+#### Autoencoder training ###
+#process h5 file for 25 input features
 
-#### V2 Autoencoder training ###
-# Updated process h5 file for 25 input features
-def process_h5_file0_newData(input_filename):
+def process_h5_file_Data(input_filename):
     """
     This is for new Data: 
     Reads NPV from PV_npvsGood.
@@ -280,10 +246,12 @@ def process_h5_file0_newData(input_filename):
 
         npvsGood_smr1_values = h5_file['PV_npvsGood'][:]#_smr1
         #Ht_values = h5_file['ht'][:]
-        # Calcolo manuale di HT con selezioni su pt ed eta
-        sorted_data_array = sort_obj0(data_array)
-
-        Ht_values = np.zeros(n_selected)  # <- make sure this is before the for loop
+        
+        
+        sorted_data_array = data_array
+        _sort_by_pt_desc_inplace(sorted_data_array)
+        
+        Ht_values = np.zeros(n_selected) 
 
         for i in range(n_selected):
             ht = 0
@@ -297,8 +265,13 @@ def process_h5_file0_newData(input_filename):
                     sorted_data_array[i, j, 2] = 0.0
                     sorted_data_array[i, j, 0] = -1
                     sorted_data_array[i, j, 1] = -1
+                
             Ht_values[i] = ht
-  
+
+
+        
+        #_sort_by_pt_desc_inplace(sorted_data_array) #it's a choice to resort it again or no
+
         
         # Remove entries where npv == 0
         non_zero_mask = npvsGood_smr1_values > 0  
@@ -336,7 +309,7 @@ def process_h5_file0_newData(input_filename):
 
 
 
-def process_h5_file_newMC(input_filename):
+def process_h5_file_MC(input_filename):
     """
     This is for new MC Data:
     Reads NPV from PV_npvsGood_smr1.
@@ -379,10 +352,11 @@ def process_h5_file_newMC(input_filename):
         Ht_values = Ht_values[non_zero_mask]
         
         
+        sorted_data_array = data_array
+        _sort_by_pt_desc_inplace(sorted_data_array)
         # Add npvsGood_smr1 values to the last column (time column)
-        sorted_data_array = sort_obj0(data_array)
         #sorted_data_array[:, :, 3] = npvsGood_smr1_values[:, np.newaxis]
-  
+
         
         zero_pt_mask = sorted_data_array[:, :, 2] == 0  # Identify where pt == 0
         sorted_data_array[:, :, 0][zero_pt_mask] = -1   # Set eta to -1 where pt == 0
@@ -411,12 +385,12 @@ def load_bkg_aa_tt(args):
       tt_jets,  tt_ht,  tt_npv
     "when we work with background real data we only care about jets with |eta|<2.5 and pt>20GeV"
     """
-    if args.control == "MC":
-        bkg = process_h5_file_newMC(args.minbias)
-        aa = process_h5_file_newMC(args.aa)
-        tt = process_h5_file_newMC(args.tt)
+    if args.bkgType == "MC":
+        bkg = process_h5_file_MC(args.MCBkg)
+        aa = process_h5_file_MC(args.BSMSig)
+        tt = process_h5_file_MC(args.SMSig)
     else:  # RealData
-        bkg = process_h5_file0_newData(args.data)
-        aa = process_h5_file0_newData(args.aa)
-        tt = process_h5_file0_newData(args.tt)
+        bkg = process_h5_file_Data(args.dataBkg)
+        aa = process_h5_file_Data(args.BSMSig)
+        tt = process_h5_file_Data(args.SMSig)
     return bkg, aa, tt

@@ -8,10 +8,10 @@ import mplhep as hep
 hep.style.use("CMS")
 
 # --- File input ---
-file_name = "Data/data_Run_2016_283408_longest.h5"
+file_name = "Data/Trigger_food_Data.h5"
 
 with h5py.File(file_name, "r") as h5file:
-    npv_data = h5file["PV_npvsGood"][:]
+    npv_data = h5file["bkg_Npv"][:]
 
 npv_data = npv_data[npv_data > 0]
 

@@ -5,7 +5,7 @@ def PD_controller1(r_: float, pre_: float, cut_: float):
 
     Returns (new_cut, error)
     """
-    Kp = 30
+    Kp = 100
     Kd = 5
     target = 0.25
     error = r_ - target
@@ -19,8 +19,8 @@ def PD_controller2(r_: float, pre_: float, cut_: float):
 
     Returns (new_cut, error)
     """
-    Kp = 80 #SH uses 80 for v2. origianlly 15
-    Kd = 0 
+    Kp = 15 #SH uses 80 for v2.
+    Kd = 0
     target = 0.25
     error = r_ - target
     delta = error - pre_

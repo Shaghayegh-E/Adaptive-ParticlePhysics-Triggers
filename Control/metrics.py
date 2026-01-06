@@ -1,4 +1,4 @@
-# rates, cost helpers, accumulation utilities singletrigger helpers
+# rates, cost helpers, accumulation utilities 
 from __future__ import annotations
 import numpy as np
 from typing import Tuple
@@ -32,10 +32,17 @@ def comp_costs(
     b_Tcomp_cost = (ht_weight * (b_ht_count - b_both_count) + as_weight * b_as_count) / (b_accepted_events + 1e-10)
     return b_Ecomp_cost, b_Tcomp_cost
 
-def average_perf_bins(arr: np.ndarray, n_bins: int = 25) -> np.ndarray:
-    idx = np.arange(len(arr))
-    bins = np.array_split(idx, n_bins)
-    return np.array([float(np.mean(arr[b])) for b in bins], dtype=np.float32)
+
+def average_perf_bins(performance_list, n_bins=25):
+    time_indices = np.arange(len(performance_list))
+    bins = np.array_split(time_indices, n_bins)
+    avg_performance = []
+    for bin_indices in bins:
+        avg_perf = np.mean([performance_list[i] for i in bin_indices])
+        avg_performance.append(avg_perf)
+
+    return np.array(avg_performance)
+
 
 def comp_cost_test(bht, bas, bnjets, sht1, sas1, snjets1, sht2, sas2, snjets2,
 use_path1=True, use_path2=True):
@@ -49,7 +56,7 @@ use_path1=True, use_path2=True):
 
     HT, AS = np.meshgrid(ht_vals, as_vals, indexing='ij')
 
-    # ---------- SIGNAL PATH 1 ----------
+    # ---------- PATH 1 ----------
     if use_path1:
         s1_accepted_ht = sht1[:, None, None] >= HT[None, :, :]
         s2_accepted_ht = sht2[:, None, None] >= HT[None, :, :]
@@ -63,7 +70,7 @@ use_path1=True, use_path2=True):
         
         
 
-    # ---------- SIGNAL PATH 2 ----------
+    # ---------- PATH 2 ----------
     if use_path2:
         s1_accepted_as = sas1[:, None, None] >= AS[None, :, :]
         s2_accepted_as = sas2[:, None, None] >= AS[None, :, :]
@@ -95,7 +102,7 @@ use_path1=True, use_path2=True):
     total_s_rate = 100 * total_s_accepted_events / (sht1.shape[0] + sht2.shape[0] + 1e-10)
 
     Ht_cost = 1
-    AS_cost =4
+    AS_cost = 4
     
     b_ht_count = b_accepted_ht.sum(axis=0)
     b_as_count = b_accepted_as.sum(axis=0)
@@ -121,27 +128,3 @@ use_path1=True, use_path2=True):
 
     return cost, b_Ecomp_cost, b_Tcomp_cost
 
-
-
-
-# single-path trigger helpers
-
-def rate_above_threshold(values: np.ndarray, cut: float) -> float:
-    """Return percentage of values >= cut."""
-    n = max(1, values.size)
-    return 100.0 * float((values >= cut).sum()) / n
-
-def fixed_cuts_from_calibration(bht, bas01, bas04, start=500_000, end=600_000,
-                                p_ht=99.75, p_as=99.75):
-    sl = slice(start, min(end, bht.size))
-    fixed_ht  = float(np.percentile(bht[sl],   p_ht))
-    fixed_as1 = float(np.percentile(bas01[sl], p_as))
-    fixed_as4 = float(np.percentile(bas04[sl], p_as))
-    return fixed_ht, fixed_as1, fixed_as4
-
-def slice_by_npv(npv_sig, npv_min, npv_max):
-    return (npv_sig >= npv_min) & (npv_sig <= npv_max)
-
-def running_average(prev_avg: float, count: int, new_val: float) -> float:
-    """Incremental average used in your cumulative plots."""
-    return (prev_avg * (count - 1) + new_val) / max(1, count)

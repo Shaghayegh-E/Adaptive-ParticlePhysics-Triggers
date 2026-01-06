@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import numpy as np
 from typing import Dict, Any
-from .preprocess import process_h5_file_data
+from .data_io import process_h5_file
 from .scoring import load_autoencoders, calculate_batch_loss, calculate_H_met, count_njets
 
 import matplotlib.pyplot as plt
@@ -35,10 +35,10 @@ def compute_missing_ht(jets):
     py = np.sum(jets[:, :, 2] * np.sin(jets[:, :, 1]), axis=1)  # pt * sin(phi)
     return np.sqrt(px**2 + py**2)
 
-mc_bkg_jets, mc_bkg_ht = process_h5_file_data("Data/MinBias_1.h5") 
-mc_ttbar_jets, mc_ttbar_ht = process_h5_file_data("Data/TT_1.h5")
-mc_aa_jets, mc_aa_ht = process_h5_file_data("Data/HToAATo4B.h5")
-mc_data_jets, mc_data_ht = process_h5_file_data("Data/data_Run_2016_283408_longest.h5")
+mc_bkg_jets, mc_bkg_ht = process_h5_file("Data/MinBias_1.h5") 
+mc_ttbar_jets, mc_ttbar_ht = process_h5_file("Data/TT_1.h5")
+mc_aa_jets, mc_aa_ht = process_h5_file("Data/HToAATo4B.h5")
+mc_data_jets, mc_data_ht = process_h5_file("Data/data_Run_2016_283408_longest.h5")
 
 mc_bkg_missing_ht = compute_missing_ht(mc_bkg_jets)
 mc_ttbar_missing_ht = compute_missing_ht(mc_ttbar_jets)
