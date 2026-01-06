@@ -182,7 +182,7 @@ def _read_score(h5, prefix: str, dim: int):
     Trigger_food_MC.h5 or Trigger_food_Data.h5 or Matched_data_2016_dim2.h5 : f"{prefix}_score{dim:02d}" like mc_bkg_score02 or data_bkg_score02.
     """
     d2 = f"{int(dim):02d}"
-    for k in (f"{prefix}_score{d2}", f"{prefix}_scores{d2}"):
+    for k in (f"{prefix}_score0{d2}", f"{prefix}_scores0{d2}"):
         if k in h5:
             return h5[k][:]
     return None
@@ -215,6 +215,47 @@ def print_h5_tree(path: str, max_items: int | None = None) -> None:
     if max_items is not None:
         print(f"  ... printed up to max_items={max_items}")
     print("")
+def _read_score(h5, prefix: str, dim: int):
+    """
+    Supports either:
+      - top-level datasets: f"{prefix}_score02"
+      - groups: h5[prefix][f"score02"]
+      - minor naming variants: score2, score_02, etc.
+    Returns None if not found.
+    """
+    d = int(dim)
+
+    # 1) Common top-level dataset names
+    candidates = [
+        f"{prefix}_score{d:02d}",   # data_bkg_score02  (your file)
+        f"{prefix}_score{d}",       # data_bkg_score2
+        f"{prefix}_score_{d:02d}",  # data_bkg_score_02
+        f"{prefix}_score_{d}",      # data_bkg_score_2
+    ]
+    for k in candidates:
+        if k in h5:
+            return h5[k][:]
+
+    # 2) Group-style layout: h5["data_bkg"]["score02"]
+    if prefix in h5 and hasattr(h5[prefix], "keys"):
+        g = h5[prefix]
+        gcands = [f"score{d:02d}", f"score{d}", f"score_{d:02d}", f"score_{d}"]
+        for kk in gcands:
+            if kk in g:
+                return g[kk][:]
+
+    # 3) Path-style layout: "data_bkg/score02"
+    path_candidates = [
+        f"{prefix}/score{d:02d}",
+        f"{prefix}/score{d}",
+        f"{prefix}/score_{d:02d}",
+        f"{prefix}/score_{d}",
+    ]
+    for k in path_candidates:
+        if k in h5:
+            return h5[k][:]
+
+    return None
 
 
 def read_any_h5(path: str, score_dim_hint: int = 2):
@@ -248,13 +289,13 @@ def read_any_h5(path: str, score_dim_hint: int = 2):
             Tnpv = h5["tt_Npv"][:] if "tt_Npv" in keys else np.zeros_like(Tht, dtype=np.float32)
             Anpv = h5["aa_Npv"][:] if "aa_Npv" in keys else np.zeros_like(Aht, dtype=np.float32)
             # suppose dim = 2
-            Bas2 = _read_score(h5, "mc_bkg", hint)
+            Bas = _read_score(h5, "mc_bkg", hint)
 
-            Tas2 = _read_score(h5, "mc_tt",  hint)
+            Tas = _read_score(h5, "mc_tt",  hint)
 
-            Aas2 = _read_score(h5, "mc_aa",  hint)
+            Aas = _read_score(h5, "mc_aa",  hint)
 
-            if Bas2 is None or Tas2 is None or Aas2 is None:
+            if Bas is None or Tas is None or Aas is None:
                 raise SystemExit(
                     f"[read_any_h5] MC file missing score{hint:02d}. "
                     f"Expected keys like mc_bkg_score{hint:02d}, mc_tt_score{hint:02d}, mc_aa_score{hint:02d}. "
@@ -263,15 +304,17 @@ def read_any_h5(path: str, score_dim_hint: int = 2):
 
 
 
-            return dict(
+            out = dict(
                 Bht=Bht, Bnpv=Bnpv,
-                Bas2=Bas2,
                 Tht=Tht, Tnpv=Tnpv,
-                Tas2=Tas2, 
                 Aht=Aht, Anpv=Anpv,
-                Aas2=Aas2,
-                meta=dict(matched_by_index=False),
+                meta=dict(matched_by_index=False, score_dim=hint),
             )
+            out[f"Bas{hint}"] = Bas
+            out[f"Tas{hint}"] = Tas
+            out[f"Aas{hint}"] = Aas
+            return out
+
 
         # ------------------------------------------------------------
         # Case B) RealData Trigger_food_Data (unpaired) OR paired Matched_data_2016_dim2.h5
@@ -301,10 +344,13 @@ def read_any_h5(path: str, score_dim_hint: int = 2):
             Tnpv = h5[Tnpv_k][:] if Tnpv_k else np.zeros_like(Tht, dtype=np.float32)
             Anpv = h5[Anpv_k][:] if Anpv_k else np.zeros_like(Aht, dtype=np.float32)
 
+            # Bas2 = _read_score(h5, "data_bkg", hint)
+
+            # Tas2 = _read_score(h5, "data_tt",  hint)
+
+            # Aas2 = _read_score(h5, "data_aa",  hint)
             Bas2 = _read_score(h5, "data_bkg", hint)
-
             Tas2 = _read_score(h5, "data_tt",  hint)
-
             Aas2 = _read_score(h5, "data_aa",  hint)
 
             if Bas2 is None or Tas2 is None or Aas2 is None:
@@ -320,15 +366,17 @@ def read_any_h5(path: str, score_dim_hint: int = 2):
             # - If file has data_bkg_Npv, it’s unpaired Trigger_food_Data.h5 -> matched_by_index=False
             matched_by_index = ("data_Npv" in keys)
 
-            return dict(
+            out = dict(
                 Bht=Bht, Bnpv=Bnpv,
-                Bas2=Bas2, 
                 Tht=Tht, Tnpv=Tnpv,
-                Tas2=Tas2, 
                 Aht=Aht, Anpv=Anpv,
-                Aas2=Aas2, 
-                meta=dict(matched_by_index=matched_by_index),
+                meta=dict(matched_by_index=matched_by_index, score_dim=hint),
             )
+            print("keys: {}".format(keys))
+            out[f"Bas{hint}"] = Bas2
+            out[f"Tas{hint}"] = Tas2
+            out[f"Aas{hint}"] = Aas2
+            return out
 
         # ------------------------------------------------------------
         # Fall back: unknown layout

@@ -302,8 +302,6 @@ def make_event_seq_ht(
     abs_err = abs(bg_rate - target) / max(target, 1e-6)
     inband = 0.0 if tol is None else float(abs(bg_rate - target) <= float(tol))
 
-
-
     last_d = last_delta / max(max_delta, 1e-6)               # last action
     tpos = np.linspace(0.0, 1.0, K).astype(np.float32)       # time position inside seq
 
@@ -348,109 +346,6 @@ def make_event_seq_ht(
         np.full(K, err_i, dtype=np.float32),       # 17
         np.full(K, d_bg_d_cut, dtype=np.float32),  # 18
         
-    ], axis=1)
-
-    obs = np.concatenate([base, near_feats], axis=1)  # (K, 10+W)
-    return obs.astype(np.float32)
-
-def make_event_seq_ht_v0(
-    *,
-    bht, bnpv,
-    bg_rate, prev_bg_rate,
-    cut,
-    ht_mid, ht_span,
-    target,
-    K,
-    last_delta,
-    max_delta,
-    near_widths=(5.0, 10.0, 20.0),
-):
-    # 1) downsample/pad raw event streams to length K
-    htK  = _downsample_last_K(bht,  K)
-    npvK = _downsample_last_K(bnpv, K)
-
-    # 2) normalize per-event quantities
-    ht_norm  = (htK - ht_mid) / max(ht_span, 1e-6)
-    # simple npv normalization (center/scale by window stats)
-    npv_mu, npv_sd = float(np.mean(npvK)), float(np.std(npvK) + 1e-6)
-    npv_norm = (npvK - npv_mu) / npv_sd
-
-    cut_norm = (cut - ht_mid) / max(ht_span, 1e-6)
-    dist_norm = (htK - cut) / max(ht_span, 1e-6)
-    pass_flag = (htK >= cut).astype(np.float32)
-
-    # 3) chunk-level scalars broadcast to each timestep
-    err = (bg_rate - target) / max(target, 1e-6)             # rate error (fractional)
-    dbr = (bg_rate - prev_bg_rate) / max(target, 1e-6)       # rate drift
-    last_d = last_delta / max(max_delta, 1e-6)               # last action
-    tpos = np.linspace(0.0, 1.0, K).astype(np.float32)       # time position inside seq
-
-    # 4) “near cut” indicators: |ht - cut| <= width
-    near_feats = []
-    for w in near_widths:
-        near_feats.append((np.abs(htK - cut) <= float(w)).astype(np.float32))
-    near_feats = np.stack(near_feats, axis=1)  # (K, W)
-
-    # 5) base 10 features (K,10)
-    base = np.stack([
-        ht_norm,          # 0
-        npv_norm,         # 1
-        pass_flag,        # 2
-        dist_norm,        # 3
-        np.full(K, err,  dtype=np.float32),     # 4
-        np.full(K, dbr,  dtype=np.float32),     # 5
-        np.full(K, cut_norm, dtype=np.float32), # 6
-        np.full(K, last_d,   dtype=np.float32), # 7
-        np.full(K, target / 100.0, dtype=np.float32), # 8 (optional constant)
-        tpos,             # 9
-    ], axis=1)
-
-    obs = np.concatenate([base, near_feats], axis=1)  # (K, 10+W)
-    return obs.astype(np.float32)
-def make_event_seq_as_v0(
-    *,
-    bas, bnpv,
-    bg_rate, prev_bg_rate,
-    cut,
-    as_mid, as_span,
-    target,
-    K,
-    last_delta,
-    max_delta,
-    near_widths=(0.01, 0.02, 0.05),
-    step = None
-):
-    asK  = _downsample_last_K(bas,  K)
-    npvK = _downsample_last_K(bnpv, K)
-
-    as_norm = (asK - as_mid) / max(as_span, 1e-6)
-    npv_mu, npv_sd = float(np.mean(npvK)), float(np.std(npvK) + 1e-6)
-    npv_norm = (npvK - npv_mu) / npv_sd
-
-    cut_norm  = (cut - as_mid) / max(as_span, 1e-6)
-    dist_norm = (asK - cut) / max(as_span, 1e-6)
-    pass_flag = (asK >= cut).astype(np.float32)
-
-    err  = (bg_rate - target) / max(target, 1e-6)
-    dbr  = (bg_rate - prev_bg_rate) / max(target, 1e-6)
-    last_d = last_delta / max(max_delta, 1e-6)
-    tpos = np.linspace(0.0, 1.0, K).astype(np.float32)
-
-    near_feats = []
-    for w in near_widths:
-        near_feats.append((np.abs(asK - cut) <= float(w)).astype(np.float32))
-    near_feats = np.stack(near_feats, axis=1)  # (K, W)
-
-    p1, p2, tr1, tr2 = _tail_shape_features(bas, cut, step)
-
-    base = np.stack([
-        as_norm, pass_flag, dist_norm, npv_norm,
-        np.full(K, err, dtype=np.float32),
-        np.full(K, dbr, dtype=np.float32),
-        np.full(K, cut_norm, dtype=np.float32),
-        np.full(K, last_d, dtype=np.float32),
-        np.full(K, target / 100.0, dtype=np.float32),
-        tpos,
     ], axis=1)
 
     obs = np.concatenate([base, near_feats], axis=1)  # (K, 10+W)
@@ -773,3 +668,110 @@ class SeqDQNAgent:
             prev_bg_rate=prev_bg_rate,
             gamma_stab=gamma_stab,
         )
+
+
+
+
+# ADT baseline for now
+def make_event_seq_ht_v0(
+    *,
+    bht, bnpv,
+    bg_rate, prev_bg_rate,
+    cut,
+    ht_mid, ht_span,
+    target,
+    K,
+    last_delta,
+    max_delta,
+    near_widths=(5.0, 10.0, 20.0),
+):
+    # 1) downsample/pad raw event streams to length K
+    htK  = _downsample_last_K(bht,  K)
+    npvK = _downsample_last_K(bnpv, K)
+
+    # 2) normalize per-event quantities
+    ht_norm  = (htK - ht_mid) / max(ht_span, 1e-6)
+    # simple npv normalization (center/scale by window stats)
+    npv_mu, npv_sd = float(np.mean(npvK)), float(np.std(npvK) + 1e-6)
+    npv_norm = (npvK - npv_mu) / npv_sd
+
+    cut_norm = (cut - ht_mid) / max(ht_span, 1e-6)
+    dist_norm = (htK - cut) / max(ht_span, 1e-6)
+    pass_flag = (htK >= cut).astype(np.float32)
+
+    # 3) chunk-level scalars broadcast to each timestep
+    err = (bg_rate - target) / max(target, 1e-6)             # rate error (fractional)
+    dbr = (bg_rate - prev_bg_rate) / max(target, 1e-6)       # rate drift
+    last_d = last_delta / max(max_delta, 1e-6)               # last action
+    tpos = np.linspace(0.0, 1.0, K).astype(np.float32)       # time position inside seq
+
+    # 4) “near cut” indicators: |ht - cut| <= width
+    near_feats = []
+    for w in near_widths:
+        near_feats.append((np.abs(htK - cut) <= float(w)).astype(np.float32))
+    near_feats = np.stack(near_feats, axis=1)  # (K, W)
+
+    # 5) base 10 features (K,10)
+    base = np.stack([
+        ht_norm,          # 0
+        npv_norm,         # 1
+        pass_flag,        # 2
+        dist_norm,        # 3
+        np.full(K, err,  dtype=np.float32),     # 4
+        np.full(K, dbr,  dtype=np.float32),     # 5
+        np.full(K, cut_norm, dtype=np.float32), # 6
+        np.full(K, last_d,   dtype=np.float32), # 7
+        np.full(K, target / 100.0, dtype=np.float32), # 8 (optional constant)
+        tpos,             # 9
+    ], axis=1)
+
+    obs = np.concatenate([base, near_feats], axis=1)  # (K, 10+W)
+    return obs.astype(np.float32)
+def make_event_seq_as_v0(
+    *,
+    bas, bnpv,
+    bg_rate, prev_bg_rate,
+    cut,
+    as_mid, as_span,
+    target,
+    K,
+    last_delta,
+    max_delta,
+    near_widths=(0.01, 0.02, 0.05),
+    step = None
+):
+    asK  = _downsample_last_K(bas,  K)
+    npvK = _downsample_last_K(bnpv, K)
+
+    as_norm = (asK - as_mid) / max(as_span, 1e-6)
+    npv_mu, npv_sd = float(np.mean(npvK)), float(np.std(npvK) + 1e-6)
+    npv_norm = (npvK - npv_mu) / npv_sd
+
+    cut_norm  = (cut - as_mid) / max(as_span, 1e-6)
+    dist_norm = (asK - cut) / max(as_span, 1e-6)
+    pass_flag = (asK >= cut).astype(np.float32)
+
+    err  = (bg_rate - target) / max(target, 1e-6)
+    dbr  = (bg_rate - prev_bg_rate) / max(target, 1e-6)
+    last_d = last_delta / max(max_delta, 1e-6)
+    tpos = np.linspace(0.0, 1.0, K).astype(np.float32)
+
+    near_feats = []
+    for w in near_widths:
+        near_feats.append((np.abs(asK - cut) <= float(w)).astype(np.float32))
+    near_feats = np.stack(near_feats, axis=1)  # (K, W)
+
+    p1, p2, tr1, tr2 = _tail_shape_features(bas, cut, step)
+
+    base = np.stack([
+        as_norm, pass_flag, dist_norm, npv_norm,
+        np.full(K, err, dtype=np.float32),
+        np.full(K, dbr, dtype=np.float32),
+        np.full(K, cut_norm, dtype=np.float32),
+        np.full(K, last_d, dtype=np.float32),
+        np.full(K, target / 100.0, dtype=np.float32),
+        tpos,
+    ], axis=1)
+
+    obs = np.concatenate([base, near_feats], axis=1)  # (K, 10+W)
+    return obs.astype(np.float32)

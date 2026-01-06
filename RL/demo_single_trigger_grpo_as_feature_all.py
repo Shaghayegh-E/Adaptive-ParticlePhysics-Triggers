@@ -39,7 +39,8 @@ import argparse
 import random
 import csv
 import numpy as np
-from collections import deque
+from collections import deque, defaultdict
+import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -62,9 +63,11 @@ import mplhep as hep
 hep.style.use("CMS")
 
 apply_paper_style()
+from cycler import cycler
+plt.rcParams["axes.prop_cycle"] = cycler(color=plt.get_cmap("tab10").colors)
 
 # ----------------------------- plot method order -----------------------------
-PLOT_METHODS = ["Constant", "PID", "DQN", "GRPO", "GFPO-F", "GFPO-FR"]
+PLOT_METHODS = ["Constant", "PID", "ADT", "DQN", "GRPO", "GFPO-F", "GFPO-FR"]
 
 def select_plot_methods(d):
     """
@@ -110,6 +113,26 @@ class RollingWindowHT:
 
 
 # ----------------------------- metrics helpers -----------------------------
+def adt_reward_paper_style(bg_scores, sig1_scores, sig2_scores, cut, alpha=0.7, beta=0.3):
+    s_b = np.asarray(bg_scores, dtype=np.float32)
+    s_s1 = np.asarray(sig1_scores, dtype=np.float32)
+    s_s2 = np.asarray(sig2_scores, dtype=np.float32)
+    s_s = np.concatenate([s_s1, s_s2], axis=0) if (s_s1.size + s_s2.size) > 0 else np.empty(0, np.float32)
+
+    fp = int(np.sum(s_b >= cut))
+    tn = int(np.sum(s_b <  cut))
+    tp = int(np.sum(s_s >= cut)) if s_s.size else 0
+    fn = int(np.sum(s_s <  cut)) if s_s.size else 0
+
+    nb = max(1, fp + tn)
+    ns = max(1, tp + fn)
+
+    tp_n = tp / ns
+    fn_n = fn / ns
+    fp_n = fp / nb
+    tn_n = tn / nb
+
+    return float(alpha * (tp_n - fp_n - fn_n) + beta * tn_n)
 
 @dataclass
 class CtrlOut:
@@ -119,6 +142,10 @@ class BaseCtrl:
     name: str
     def step_micro(self, *, chunk: int, micro_global: int, **kwargs) -> CtrlOut:
         return CtrlOut(micro_global=micro_global)
+
+    def end_chunk(self, *, chunk: int, **kwargs):
+        """Optional hook called once per chunk (episode)."""
+        return
 
 class ConstantCtrl(BaseCtrl):
     def __init__(self, name, fixed_cut):
@@ -246,6 +273,7 @@ class DQNCtrl(BaseCtrl):
 
         return CtrlOut(micro_global=micro_global)  # DQN doesn't use micro_global for logging here
 
+
 class DQNCtrlHT(BaseCtrl):
     def __init__(self, name, init_cut, lo, hi, *, agent, deltas, step, max_delta,
                  ht_mid, ht_span, near_widths, K, target, tol, eps_min, eps_decay,
@@ -338,6 +366,205 @@ class DQNCtrlHT(BaseCtrl):
         self.last_delta = dlt
         self.step_count += 1
         return CtrlOut(micro_global=micro_global)
+
+
+
+class ADTCtrl(DQNCtrl):
+    def __init__(self, *args, adt_l=10, train_steps_per_episode=50,
+                 reward_mode="lhc", adt_alpha=0.7, adt_beta=0.3, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.adt_l = max(1, int(adt_l))
+        self.train_steps_per_episode = int(train_steps_per_episode)
+        self.reward_mode = str(reward_mode)
+        self.adt_alpha = float(adt_alpha)
+        self.adt_beta = float(adt_beta)
+
+        self._micro_in_chunk = 0
+        self._prev_action = 0  # held action index
+
+    def step_micro(self, *, bas_w, bnpv_w, bas_j, sas_tt, sas_aa, micro_global,
+                   chunk=None, grpo_samples=None, **kwargs):
+
+        bg_before = float(Sing_Trigger(bas_j, self.cut))
+        if self.prev_bg is None:
+            self.prev_bg = bg_before
+
+        self.err_i = update_err_i(self.err_i, bg_before, self.target)
+        dbgcut = d_bg_d_cut_norm(bas_j, self.cut, self.step, self.target)
+
+        obs = make_event_seq_as(
+            bas=bas_w, bnpv=bnpv_w,
+            bg_rate=bg_before, prev_bg_rate=self.prev_bg,
+            cut=self.cut,
+            as_mid=self.as_mid, as_span=self.as_span,
+            target=self.target, K=self.K,
+            last_delta=self.last_delta, max_delta=self.max_delta,
+            near_widths=self.near_widths,
+            step=self.step, tol=self.tol,
+            err_i=self.err_i, d_bg_d_cut=dbgcut
+        )
+
+        # --- ADT action-hold ---
+        eps = max(self.eps_min, 1.0 * (self.eps_decay ** self.step_count))
+        if (self._micro_in_chunk % self.adt_l) == 0:
+            self._prev_action = int(self.agent.act(obs, eps=eps))
+        a = int(self._prev_action)
+
+        dlt = float(self.deltas[a] * self.step)
+
+        # shield -> also remap action index to match executed delta (avoid label mismatch)
+        sd = shield_delta(bg_before, self.target, self.tol, self.max_delta)
+        if sd is not None:
+            dlt = float(sd)
+            a = int(np.argmin(np.abs(self.deltas * self.step - dlt)))
+
+        cut_next = float(np.clip(self.cut + dlt, self.lo, self.hi))
+
+        bg_after = float(Sing_Trigger(bas_j, cut_next))
+        tt_after = float(Sing_Trigger(sas_tt, cut_next))
+        aa_after = float(Sing_Trigger(sas_aa, cut_next))
+
+        dbgcut_next = d_bg_d_cut_norm(bas_j, cut_next, self.step, self.target)
+        obs_next = make_event_seq_as(
+            bas=bas_w, bnpv=bnpv_w,
+            bg_rate=bg_after, prev_bg_rate=bg_before,
+            cut=cut_next,
+            as_mid=self.as_mid, as_span=self.as_span,
+            target=self.target, K=self.K,
+            last_delta=dlt, max_delta=self.max_delta,
+            near_widths=self.near_widths,
+            step=self.step, tol=self.tol,
+            err_i=update_err_i(self.err_i, bg_after, self.target),
+            d_bg_d_cut=dbgcut_next,
+        )
+
+        # --- reward mode ---
+        if self.reward_mode == "paper":
+            r = adt_reward_paper_style(
+                bg_scores=bas_j, sig1_scores=sas_tt, sig2_scores=sas_aa,
+                cut=cut_next, alpha=self.adt_alpha, beta=self.adt_beta
+            )
+        else:
+            r = float(SeqDQNAgent.compute_reward(
+                bg_rate=bg_after, target=self.target, tol=self.tol,
+                sig_rate_1=tt_after, sig_rate_2=aa_after,
+                delta_applied=dlt, max_delta=self.max_delta,
+                alpha=self.alpha, beta=self.beta,
+                prev_bg_rate=bg_before, gamma_stab=0.3
+            ))
+
+        # store transition (NO training here)
+        self.agent.buf.push(obs, a, float(r), obs_next, done=False)
+
+        # advance state
+        self.cut = cut_next
+        self.prev_bg = bg_after
+        self.last_delta = dlt
+        self.step_count += 1
+        self._micro_in_chunk += 1
+
+        return CtrlOut(micro_global=micro_global)
+
+    def end_chunk(self, *, chunk: int, **kwargs):
+        # ADT-style: update ONLY at end of episode (chunk)
+        for _ in range(self.train_steps_per_episode):
+            _ = self.agent.train_step()
+        self._micro_in_chunk = 0
+class ADTCtrlHT(DQNCtrlHT):
+    def __init__(self, *args, adt_l=10, train_steps_per_episode=50,
+                 reward_mode="lhc", adt_alpha=0.7, adt_beta=0.3, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.adt_l = max(1, int(adt_l))
+        self.train_steps_per_episode = int(train_steps_per_episode)
+        self.reward_mode = str(reward_mode)
+        self.adt_alpha = float(adt_alpha)
+        self.adt_beta = float(adt_beta)
+
+        self._micro_in_chunk = 0
+        self._prev_action = 0
+
+    def step_micro(self, *, bht_w, bnpv_w, bht_j, sht_tt, sht_aa, micro_global,
+                   chunk=None, grpo_samples=None, **kwargs):
+
+        bg_before = float(Sing_Trigger(bht_j, self.cut))
+        if self.prev_bg is None:
+            self.prev_bg = bg_before
+
+        self.err_i = update_err_i(self.err_i, bg_before, self.target)
+        dbgcut = d_bg_d_cut_norm(bht_j, self.cut, self.step, self.target)
+
+        obs = make_event_seq_ht(
+            bht=bht_w, bnpv=bnpv_w,
+            bg_rate=bg_before, prev_bg_rate=self.prev_bg,
+            cut=self.cut,
+            ht_mid=self.ht_mid, ht_span=self.ht_span,
+            target=self.target, K=self.K,
+            last_delta=self.last_delta, max_delta=self.max_delta,
+            near_widths=self.near_widths,
+            step=self.step, tol=self.tol,
+            err_i=self.err_i, d_bg_d_cut=dbgcut
+        )
+
+        eps = max(self.eps_min, 1.0 * (self.eps_decay ** self.step_count))
+        if (self._micro_in_chunk % self.adt_l) == 0:
+            self._prev_action = int(self.agent.act(obs, eps=eps))
+        a = int(self._prev_action)
+
+        dlt = float(self.deltas[a] * self.step)
+
+        sd = shield_delta(bg_before, self.target, self.tol, self.max_delta)
+        if sd is not None:
+            dlt = float(sd)
+            a = int(np.argmin(np.abs(self.deltas * self.step - dlt)))
+
+        cut_next = float(np.clip(self.cut + dlt, self.lo, self.hi))
+
+        bg_after = float(Sing_Trigger(bht_j, cut_next))
+        tt_after = float(Sing_Trigger(sht_tt, cut_next))
+        aa_after = float(Sing_Trigger(sht_aa, cut_next))
+
+        dbgcut_next = d_bg_d_cut_norm(bht_j, cut_next, self.step, self.target)
+        obs_next = make_event_seq_ht(
+            bht=bht_w, bnpv=bnpv_w,
+            bg_rate=bg_after, prev_bg_rate=bg_before,
+            cut=cut_next,
+            ht_mid=self.ht_mid, ht_span=self.ht_span,
+            target=self.target, K=self.K,
+            last_delta=dlt, max_delta=self.max_delta,
+            near_widths=self.near_widths,
+            step=self.step, tol=self.tol,
+            err_i=update_err_i(self.err_i, bg_after, self.target),
+            d_bg_d_cut=dbgcut_next,
+        )
+
+        if self.reward_mode == "paper":
+            r = adt_reward_paper_style(
+                bg_scores=bht_j, sig1_scores=sht_tt, sig2_scores=sht_aa,
+                cut=cut_next, alpha=self.adt_alpha, beta=self.adt_beta
+            )
+        else:
+            r = float(SeqDQNAgent.compute_reward(
+                bg_rate=bg_after, target=self.target, tol=self.tol,
+                sig_rate_1=tt_after, sig_rate_2=aa_after,
+                delta_applied=dlt, max_delta=self.max_delta,
+                alpha=self.alpha, beta=self.beta,
+                prev_bg_rate=bg_before, gamma_stab=0.3
+            ))
+
+        self.agent.buf.push(obs, a, float(r), obs_next, done=False)
+
+        self.cut = cut_next
+        self.prev_bg = bg_after
+        self.last_delta = dlt
+        self.step_count += 1
+        self._micro_in_chunk += 1
+
+        return CtrlOut(micro_global=micro_global)
+
+    def end_chunk(self, *, chunk: int, **kwargs):
+        for _ in range(self.train_steps_per_episode):
+            _ = self.agent.train_step()
+        self._micro_in_chunk = 0
 
 class GRPOCtrl(BaseCtrl):
     """
@@ -1168,6 +1395,42 @@ def update_err_i(err_i, bg_rate, target, lam=0.95):
 # ---- GLOBAL chunk-level log store (used by log_chunk_stats / write_chunk_stats_csv) ----
 chunk_rows = []
 
+def inband_eff_by_method(chunk_rows, trigger):
+    """
+    Returns dict: method -> {"tt": mean_tt_inband, "h_to_4b": mean_aa_inband}
+    Robust to trigger labels: AD may appear as "AD" or "AS".
+    """
+    if trigger == "AD":
+        trig_ok = {"AD", "AS"}
+    else:
+        trig_ok = {trigger}
+
+    acc = defaultdict(lambda: {"tt": [], "h_to_4b": []})
+
+    for r in chunk_rows:
+        tr = str(r.get("trigger", ""))
+        if tr not in trig_ok:
+            continue
+        if int(r.get("inband", 0)) != 1:
+            continue
+
+        m = str(r.get("method", "UNK"))
+        acc[m]["tt"].append(float(r.get("tt", np.nan)))
+        acc[m]["h_to_4b"].append(float(r.get("aa", np.nan)))  # aa == h→4b
+
+    out = {}
+    for m, d in acc.items():
+        tt = np.asarray(d["tt"], dtype=np.float64)
+        aa = np.asarray(d["h_to_4b"], dtype=np.float64)
+
+        tt = tt[np.isfinite(tt)]
+        aa = aa[np.isfinite(aa)]
+
+        out[m] = {
+            "tt": float(np.mean(tt)) if tt.size else np.nan,
+            "h_to_4b": float(np.mean(aa)) if aa.size else np.nan,
+        }
+    return out
 def d_bg_d_cut_norm(scores, cut, step, target):
     # normalized derivative: (d bg_rate / d cut) / target
     step = float(step)
@@ -1266,43 +1529,67 @@ def _score_chunk_stats(x):
         p95=float(np.percentile(x, 95)),
     )
 
-def plot_inband_eff_single_signal_ad_vs_ht(eff_ad, eff_ht, *, signal_key, signal_label,
-                                          title, outpath, run_label):
+def plot_inband_eff_grouped_by_trigger(eff_ad, eff_ht, *, signal_key, signal_label,
+                                       outpath, run_label,
+                                       trigger_order=("HT", "AD")):
     """
+    Grouped bars like the CMS figure:
+      x-axis: triggers (AD Trigger, HT Trigger)
+      bars within each group: methods (Constant, PID, ADT, DQN, GRPO, GFPO-F, GFPO-FR)
+
     eff_ad/eff_ht: dict method -> {"tt": val, "h_to_4b": val}
     signal_key: "tt" or "h_to_4b"
-    Produces grouped bars per baseline: (AD trigger vs HT trigger).
     """
-    # enforce your plot method order
-    methods = []
-    for m in PLOT_METHODS:
-        if (m in eff_ad) or (m in eff_ht):
-            methods.append(m)
+    # which methods exist in either trigger
+    methods = [m for m in PLOT_METHODS if (m in eff_ad) or (m in eff_ht)]
     if not methods:
         return
 
-    ad_vals = np.array([eff_ad.get(m, {}).get(signal_key, np.nan) for m in methods], dtype=np.float64)
-    ht_vals = np.array([eff_ht.get(m, {}).get(signal_key, np.nan) for m in methods], dtype=np.float64)
+    # trigger groups
+    trig_map = {"AD": eff_ad, "HT": eff_ht}
+    triggers = [t for t in trigger_order if t in trig_map]
+    if not triggers:
+        return
 
-    x = np.arange(len(methods))
-    bw = 0.38
+    # values: shape (T, M)
+    vals = np.zeros((len(triggers), len(methods)), dtype=np.float64)
+    for ti, tr in enumerate(triggers):
+        eff = trig_map[tr]
+        for mi, m in enumerate(methods):
+            vals[ti, mi] = float(eff.get(m, {}).get(signal_key, np.nan))
+
+    x = np.arange(len(triggers), dtype=np.float64)
+    bw = 0.80 / max(1, len(methods))  # fill 80% of group width
 
     fig, ax = plt.subplots(figsize=(10, 5.6))
-    ax.bar(x - bw/2, ad_vals, width=bw, label="AD trigger")
-    ax.bar(x + bw/2, ht_vals, width=bw, label="HT trigger")
+
+    # bars (one legend entry per method)
+    for mi, m in enumerate(methods):
+        ax.bar(
+            x - 0.40 + (mi + 0.5) * bw,
+            vals[:, mi],
+            width=bw,
+            label=m,
+        )
 
     ax.set_xticks(x)
-    ax.set_xticklabels(methods, rotation=15, ha="right")
-    ax.set_ylabel(f"Mean {signal_label} efficiency (in-band)")
-    ax.set_title(title)
-    ax.set_ylim(0.0, 1.05)
+    ax.set_xticklabels([f"{tr} Trigger" for tr in triggers])
+    ax.set_ylabel(f"In-band efficiency ({signal_label})")
     ax.grid(True, axis="y", linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True)
+
+    # start y-axis at 80 for ttbar
+    if signal_key == "tt":
+        ax.set_ylim(bottom=85)          # keep top auto
+        # or: ax.set_ylim(80, 100)       # if you want fixed top
+
+    # legend is methods (like your example figure)
+    small_legend(ax, loc="best", ncol=1)
 
     add_cms_header(fig, run_label=run_label)
     finalize_diag_fig(fig)
     save_png(fig, str(outpath))
     plt.close(fig)
+
 
 
 def _plot_score_density_heatmap(time, hists, edges, *, title, outpath, run_label):
@@ -1352,7 +1639,7 @@ def _plot_score_summary(time, stats_list, *, title, outpath, run_label):
     ax.set_ylabel("Score")
     ax.set_title(title)
     ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True)
+    small_legend(ax, loc="best")
     add_cms_header(fig, run_label=run_label)
     finalize_diag_fig(fig)
     save_png(fig, str(outpath))
@@ -1376,7 +1663,7 @@ def _plot_adv_compare_ecdf(x_grpo, x_gfpo, *, title, outpath, run_label):
     ax.set_ylabel("CDF")
     ax.grid(True, linestyle="--", alpha=0.4)
     ax.set_title(title)
-    ax.legend(loc="best", frameon=True)
+    small_legend(ax, loc="best")
     add_cms_header(fig, run_label=run_label)
     finalize_diag_fig(fig)
     save_png(fig, str(outpath))
@@ -1451,6 +1738,31 @@ def build_series_from_chunk_rows(chunk_rows, trigger):
         )
     return out
 
+# ----------------------------- legend styling -----------------------------
+LEGEND_FONTSIZE = 11
+LEGEND_TITLE_FONTSIZE = 11
+
+def small_legend(ax, *, title=None, loc="best", ncol=1, **kwargs):
+    """
+    Consistent compact legend across all plots.
+    """
+    if "fontsize" not in kwargs:
+        kwargs["fontsize"] = LEGEND_FONTSIZE
+    if title and ("title_fontsize" not in kwargs):
+        kwargs["title_fontsize"] = LEGEND_TITLE_FONTSIZE
+    return ax.legend(
+        loc=loc,
+        frameon=True,
+        title=title,
+        ncol=ncol,
+        handlelength=1.6,
+        handletextpad=0.4,
+        labelspacing=0.25,
+        borderpad=0.30,
+        columnspacing=0.8,
+        markerscale=0.9,
+        **kwargs,
+    )
 def make_original_plots_for_trigger(series, *, trigger_name, fixed_cut, target, tol, plots_dir, run_label, w=3):
     if not series:
         return
@@ -1491,7 +1803,9 @@ def make_original_plots_for_trigger(series, *, trigger_name, fixed_cut, target, 
         title=f"{trigger_name} Trigger",
         outpath=plots_dir / f"cut_step_hist_{trigger_name.lower()}",
         run_label=run_label,
-        bins=30,
+        raw=True,
+        use_abs=False,
+        max_points=8000,
     )
 
     # 5) Rate + cut time-series (your “core plots”)
@@ -1536,7 +1850,7 @@ def plot_rate_from_series(series_by_method, *, target, tol, title, outpath, run_
     ax.set_ylabel("Background rate [kHz]")
     ax.set_ylim(0, 200)
     ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True, title=title, fontsize=10)
+    small_legend(ax, loc="best", title=title)
     add_cms_header(fig, run_label=run_label)
     finalize_diag_fig(fig)
     save_png(fig, str(outpath))
@@ -1556,7 +1870,7 @@ def plot_cut_from_series(series_by_method, *, fixed_cut, ylabel, title, outpath,
     ax.set_xlabel("Time (Fraction of Run)")
     ax.set_ylabel(ylabel)
     ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True, title=title)
+    small_legend(ax, loc="best", title=title)
     add_cms_header(fig, run_label=run_label)
     finalize_diag_fig(fig)
     save_png(fig, str(outpath))
@@ -1827,7 +2141,7 @@ def write_paper_table(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct):
     # triggers = sorted(set(r["Trigger"] for r in rows))
     # ---- Force trigger/method order in outputs ----
     trigger_order = ["HT", "AD"]   
-    method_order  = ["Constant", "PID", "DQN", "GRPO", "GFPO-F", "GFPO-FR"]
+    method_order  = ["Constant", "PID", "ADT", "DQN", "GRPO", "GFPO-F", "GFPO-FR"]
 
     trig_rank = {t: i for i, t in enumerate(trigger_order)}
     meth_rank = {m: i for i, m in enumerate(method_order)}
@@ -1944,7 +2258,7 @@ def plot_cdf_abs_err_multi(rate_khz_by_method, target_khz, tol_khz, title, outpa
     ax.set_xlabel(r"$|r-r^*|$ [kHz]")
     ax.set_ylabel("CDF")
     ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True, title=title)
+    small_legend(ax, loc="best", title=title)
     add_cms_header(fig, run_label=run_label)
     finalize_diag_fig(fig)
     save_png(fig, str(outpath))
@@ -2056,7 +2370,7 @@ def plot_feasible_ratio_timeseries(stats_grpo, stats_gfpo, *, title, outpath, ru
     ax.set_ylabel(r"Feasible ratio  (#cand with |bg-target|<=tol) / #cand")
     ax.set_ylim(-0.02, 1.02)
     ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True, title=title)
+    small_legend(ax, loc="best", title=title)
     add_cms_header(fig, run_label=run_label)
     finalize_diag_fig(fig)
     save_png(fig, str(outpath))
@@ -2092,7 +2406,7 @@ def plot_feasibility_bar(stats_grpo, stats_gfpo, *, title, outpath, run_label):
     ax.set_ylabel("Fraction")
     ax.set_ylim(-0.02, 1.05)
     ax.grid(True, axis="y", linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True, title=title)
+    small_legend(ax, loc="best", title=title)
     add_cms_header(fig, run_label=run_label)
     finalize_diag_fig(fig)
     save_png(fig, str(outpath))
@@ -2109,6 +2423,7 @@ def plot_running_inband_multi(time, inband_by_method, w, title, outpath, run_lab
         "Constant": dict(linestyle="--", linewidth=2.2),
         "PID":      dict(linestyle="-",  linewidth=2.2),
         "DQN":      dict(linestyle=(0, (8, 2, 2, 2)), linewidth=2.6, marker="o", markersize=3, markevery=8),
+        "ADT": dict(linestyle=(0, (6, 2)), linewidth=2.6),
         "GRPO":     dict(linestyle=(0, (10, 2, 2, 2)), linewidth=2.8),
         "GFPO-F":   dict(linestyle=(0, (4, 2)), linewidth=2.6),
         "GFPO-FR":  dict(linestyle=(0, (2, 2)), linewidth=2.6),
@@ -2116,57 +2431,92 @@ def plot_running_inband_multi(time, inband_by_method, w, title, outpath, run_lab
     for name, m in inband_by_method.items():
         y = running_mean_bool(m, w=int(w))
         t = np.linspace(0.0, 1.0, len(y))
-        ax.plot(time, y, label=f"{name} (w={int(w)})", **style.get(name, {}))
+        ax.plot(t, y, label=f"{name} (w={int(w)})", **style.get(name, {}))
 
 
     ax.set_xlabel("Time (Fraction of Run)")
     ax.set_ylabel("Running in-band fraction")
     ax.set_ylim(0.0, 1.05)
     ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True, title=title)
+    small_legend(ax, loc="best", title=title)
     add_cms_header(fig, run_label=run_label)
     finalize_diag_fig(fig)
     save_png(fig, str(outpath))
     plt.close(fig)
 
 
-def plot_cut_step_hist_multi(cut_by_method, xlabel, title, outpath, run_label, bins=30,
-                             allow_constant_zeros=True
-                             ):
+def plot_cut_step_hist_multi(
+    cut_by_method,
+    xlabel,
+    title,
+    outpath,
+    run_label,
+    bins=30,  # kept for backward compat; ignored in raw mode
+    allow_constant_zeros=True,
+    raw=True,                 # <-- NEW: default to raw delta plot
+    use_abs=False,            # <-- NEW: if True, plot |Δcut| raw values
+    max_points=8000,          # <-- NEW: cap points per method (subsample)
+):
     """
-    cut_by_method: dict(name -> 1D cut history)
-    If allow_constant_zeros: constant menu can produce a delta array of zeros.
+    If raw=True: plot per-step raw deltas (no binning) as a scatter over time.
+    If raw=False: fall back to the old histogram behavior (binned).
     """
     cut_by_method = select_plot_methods(cut_by_method)
+
     fig, ax = plt.subplots(figsize=(8, 5.2))
     any_plotted = False
+
     for name, c in cut_by_method.items():
         c = np.asarray(c, dtype=np.float64)
 
-        if c.size >= 2:
-            dc = np.diff(c)
-        else:
-            dc = np.array([], dtype=np.float64)
+        dc = np.diff(c) if c.size >= 2 else np.array([], dtype=np.float64)
 
         if dc.size == 0 and allow_constant_zeros:
-            # if we only have one point, or no history, treat as "no motion"
+            # constant / degenerate history -> show "no motion"
             dc = np.zeros(max(1, c.size - 1), dtype=np.float64)
 
-        if dc.size:
-            ax.hist(np.abs(dc), bins=int(bins), alpha=0.50, label=name)
-            any_plotted = True
+        if dc.size == 0:
+            continue
+
+        y = np.abs(dc) if use_abs else dc
+
+        if raw:
+            # subsample for readability / speed
+            n = y.size
+            stride = max(1, int(np.ceil(n / max(1, int(max_points)))))
+            y_s = y[::stride]
+            t_s = np.linspace(0.0, 1.0, y_s.size)  # normalized time axis
+
+            ax.plot(
+                t_s,
+                y_s,
+                linestyle="None",
+                marker=".",
+                markersize=3.0,
+                alpha=0.55,
+                label=name,
+            )
+        else:
+            # old behavior: binned histogram
+            ax.hist(y, bins=int(bins), alpha=0.50, label=name)
+
+        any_plotted = True
 
     if not any_plotted:
-        ax.text(0.5, 0.5, "No cut history to plot", ha="center", va="center", transform=ax.transAxes)
+        ax.text(0.5, 0.5, "No cut history to plot", ha="center", va="center",
+                transform=ax.transAxes)
 
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Count")
+    ax.axhline(0.0, linestyle="--", linewidth=1.2, alpha=0.6)
+    ax.set_xlabel("Time (Fraction of Run)" if raw else xlabel)
+    ax.set_ylabel(r"$\Delta \mathrm{cut}$" if raw and not use_abs else (r"$|\Delta \mathrm{cut}|$" if raw else "Count"))
     ax.grid(True, linestyle="--", alpha=0.4)
-    ax.legend(loc="best", frameon=True, title=title)
+    small_legend(ax, loc="best", title=title)
+
     add_cms_header(fig, run_label=run_label)
     finalize_diag_fig(fig)
     save_png(fig, str(outpath))
     plt.close(fig)
+
 
 
 def plot_inband_eff_bars_multi(summary_by_method, title, outpath, run_label):
@@ -2193,7 +2543,7 @@ def plot_inband_eff_bars_multi(summary_by_method, title, outpath, run_label):
     ax.set_xticklabels(labels)
     ax.set_ylabel("Mean signal efficiency (in-band)")
     ax.grid(True, axis="y", linestyle="--", alpha=0.5)
-    ax.legend(loc="best", frameon=True, title=title)
+    small_legend(ax, loc="best", title=title)
     add_cms_header(fig, run_label=run_label)
     finalize_diag_fig(fig)
     save_png(fig, str(outpath))
@@ -2276,7 +2626,7 @@ def main():
     ap.add_argument("--score-dim-hint", type=int, default=2)
     ap.add_argument("--as-dim", type=int, default=2, choices=[1, 2, 4, 6, 8])
 
-    ap.add_argument("--as-deltas", type=str, default="-3,-1.5,0,1.5,3")
+    ap.add_argument("--as-deltas", type=str, default="-3,-1.5,0,1.5,3",choices=["-3,-1.5,0,1.5,3","-4,-2,-1,0,1,2,4"])
     ap.add_argument("--as-step", type=float, default=0.5)
 
     ap.add_argument("--print-keys", action="store_true")
@@ -2351,9 +2701,19 @@ def main():
     ap.add_argument(
         "--baselines",
         type=str,
-        default="constant,pid,dqn,grpo,gfpo_f,gfpo_fr",
+        default="constant,pid,adt,dqn,grpo,gfpo_f,gfpo_fr",
         help="Comma-separated: constant,pid,dqn,grpo,gfpo_f,gfpo_fr"
     )
+
+    ap.add_argument("--run-adt", action="store_true", help="Enable ADT baseline (DQN with action-hold + end-of-chunk updates)")
+    ap.add_argument("--adt-l", type=int, default=10, help="ADT action-hold: update action every l micro-steps")
+    ap.add_argument("--adt-train-steps-per-episode", type=int, default=50, help="ADT: gradient steps ONLY at end of each chunk")
+
+    ap.add_argument("--adt-reward-mode", default="lhc", choices=["lhc", "paper"],
+                help="ADT reward: 'lhc' uses your rate-tracking reward; 'paper' uses TP/TN/FP/FN style reward")
+    ap.add_argument("--adt-alpha", type=float, default=0.7)
+    ap.add_argument("--adt-beta",  type=float, default=0.3)
+
 
     global chunk_rows
     chunk_rows = []
@@ -2638,7 +2998,35 @@ def main():
         feas_mult=args.gfpo_feas_mult, mix=args.gfpo_mix,
         band_mult=args.band_mult_as, sig_bonus=args.sig_bonus_as
         ))
-    
+    # --- ADT baseline (AS): DQN + action-hold + end-of-chunk updates ---
+    if args.run_adt and ("adt" in BASELINES):
+        adt_cfg_as = DQNConfig(
+        lr=float(args.dqn_lr),
+        gamma=float(args.dqn_gamma),
+        batch_size=int(args.dqn_batch_size),
+        target_update=int(args.dqn_target_update),
+        )
+        agent_adt_as = SeqDQNAgent(
+        seq_len=K, feat_dim=feat_dim_as, n_actions=len(AS_DELTAS),
+        cfg=adt_cfg_as, seed=SEED + 101
+        )
+
+        controllers_as.append(ADTCtrl(
+        name="ADT",
+        init_cut=fixed_AS_cut, lo=as_lo, hi=as_hi,
+        agent=agent_adt_as,
+        deltas=AS_DELTAS, step=AS_STEP, max_delta=MAX_DELTA_AS,
+        as_mid=as_mid, as_span=as_span,
+        near_widths=near_widths_as, K=K,
+        target=target, tol=tol,
+        eps_min=args.dqn_eps_min, eps_decay=args.dqn_eps_decay,
+        train_steps_per_micro=0,               # ignored by ADT (no per-micro train)
+        alpha=args.alpha, beta=args.beta,      # used for reward_mode="lhc"
+        adt_l=args.adt_l,
+        train_steps_per_episode=args.adt_train_steps_per_episode,
+        reward_mode=args.adt_reward_mode,
+        adt_alpha=args.adt_alpha, adt_beta=args.adt_beta,
+        ))
     if args.run_ht:
 
         err_i_ht_dqn  = 0.0
@@ -2686,6 +3074,36 @@ def main():
             seq_len=K, feat_dim=feat_dim_ht, n_actions=len(HT_DELTAS),
             cfg=dqn_ht_cfg, seed=SEED
         )
+        
+        # --- ADT baseline (HT) ---
+        if args.run_adt and ("adt" in BASELINES):
+            adt_cfg_ht = DQNConfig(
+                lr=float(args.dqn_lr),
+                gamma=float(args.dqn_gamma),
+                batch_size=int(args.dqn_batch_size),
+                target_update=int(args.dqn_target_update),
+            )
+            agent_adt_ht = SeqDQNAgent(
+                seq_len=K, feat_dim=feat_dim_ht, n_actions=len(HT_DELTAS),
+                cfg=adt_cfg_ht, seed=SEED + 202
+            )
+
+            controllers_ht.append(ADTCtrlHT(
+            name="ADT",
+            init_cut=fixed_Ht_cut, lo=ht_lo, hi=ht_hi,
+            agent=agent_adt_ht,
+            deltas=HT_DELTAS, step=HT_STEP, max_delta=MAX_DELTA_HT,
+            ht_mid=ht_mid, ht_span=ht_span,
+            near_widths=near_widths_ht, K=K,
+            target=target, tol=tol,
+            eps_min=args.dqn_eps_min, eps_decay=args.dqn_eps_decay,
+            train_steps_per_micro=0,              # ignored by ADT
+            alpha=args.alpha, beta=args.beta,
+            adt_l=args.adt_l,
+            train_steps_per_episode=args.adt_train_steps_per_episode,
+            reward_mode=args.adt_reward_mode,
+            adt_alpha=args.adt_alpha, adt_beta=args.adt_beta,
+            ))
 
         if "constant" in BASELINES:
             controllers_ht.append(ConstantCtrl("Constant", fixed_Ht_cut))
@@ -2957,7 +3375,7 @@ def main():
 
             for ctrl in controllers_as:
             # only micro-step for methods that actually update on micro
-                if ctrl.name in ("DQN", "GRPO", "GFPO-F", "GFPO-FR"):
+                if ctrl.name in ("DQN", "ADT", "GRPO", "GFPO-F", "GFPO-FR"):
                     out = ctrl.step_micro(
                         chunk=t,
                         bas_w=bas_w, bnpv_w=bnpv_w,
@@ -2978,7 +3396,7 @@ def main():
                 bht_j = Bht[idx_eval]
 
                 for ctrl in controllers_ht:
-                    if ctrl.name in ("DQN", "GRPO", "GFPO-F", "GFPO-FR"):
+                    if ctrl.name in ("DQN", "ADT", "GRPO", "GFPO-F", "GFPO-FR"):
                         out = ctrl.step_micro(
                             chunk=t,
                             bht_w=bht_w, bnpv_w=bnpv_w_ht,
@@ -3000,7 +3418,13 @@ def main():
             print("=" * 140 + "\n")
 
     
-        
+        # --- end-of-chunk hooks (ADT trains here) ---
+        for ctrl in controllers_as:
+            ctrl.end_chunk(chunk=t)
+
+        if args.run_ht:
+            for ctrl in controllers_ht:
+                ctrl.end_chunk(chunk=t)
         # ============================
         # CHUNK-LEVEL logging (ONCE per chunk)
         # ============================
@@ -3095,39 +3519,6 @@ def main():
     # Inspired by: https://arxiv.org/pdf/2504.08837 VL rethinker
     # Note: paper-style normalized advantages use (r - mean)/std. :contentReference[oaicite:1]{index=1}
 
-    # (AD trigger)
-    # adv_raw_as, adv_norm_as, adv_raw_exec_as, adv_norm_exec_as, frac_vanish_as = \
-    #     _group_advantages_from_grpo_samples(grpo_samples, trigger="AS", baseline="mean")
-
-    # _plot_adv_hist_and_ecdf(
-    #     adv_raw_as,
-    #     title=f"GRPO Candidate Advantage (AS)  | vanish={frac_vanish_as:.2%}",
-    #     xlabel=r"$A = r - \mathrm{mean}(r)$",
-    #     outpath_prefix=plots_dir / "adv_as_candidate_raw",
-    #     run_label=run_label,
-    # )
-    # _plot_adv_hist_and_ecdf(
-    #     adv_norm_as,
-    #     title=f"GRPO Candidate Advantage Norm (AS)  | vanish={frac_vanish_as:.2%}",
-    #     xlabel=r"$\hat A = (r-\mathrm{mean}(r))/\mathrm{std}(r)$",
-    #     outpath_prefix=plots_dir / "adv_as_candidate_norm",
-    #     run_label=run_label,
-    # )
-    # _plot_adv_hist_and_ecdf(
-    #     adv_raw_exec_as,
-    #     title="GRPO Executed Advantage (AS) (post-shield)",
-    #     xlabel=r"$A_{\mathrm{exec}} = r_{\mathrm{exec}} - \mathrm{mean}(r_{\mathrm{cand}})$",
-    #     outpath_prefix=plots_dir / "adv_as_executed_raw",
-    #     run_label=run_label,
-    # )
-    # _plot_adv_hist_and_ecdf(
-    #     adv_norm_exec_as,
-    #     title="GRPO Executed Advantage Norm (AS) (post-shield)",
-    #     xlabel=r"$\hat A_{\mathrm{exec}}$",
-    #     outpath_prefix=plots_dir / "adv_as_executed_norm",
-    #     run_label=run_label,
-    # )
-
 
     write_chunk_stats_csv(tables_dir / "chunk_stats.csv")
 
@@ -3202,25 +3593,30 @@ def main():
                 }
             return out
 
-        eff_ad = _inband_eff(as_series)      # AD trigger series
-        eff_ht = _inband_eff(ht_series)      # HT trigger series
+        eff_ad = inband_eff_by_method(chunk_rows, "AD")
+        eff_ht = inband_eff_by_method(chunk_rows, "HT")
 
-        # ttbar plot
-        plot_inband_eff_single_signal_ad_vs_ht(
+        # Print a quick comparison table (h→4b)
+        print("\nMean in-band h→4b efficiency (AD vs HT)")
+        print("Method     AD(h4b)   HT(h4b)")
+        for m in PLOT_METHODS:
+            ad = eff_ad.get(m, {}).get("h_to_4b", np.nan)
+            ht = eff_ht.get(m, {}).get("h_to_4b", np.nan)
+            print(f"{m:<9}  {ad:8.4f}  {ht:8.4f}")
+        # ttbar plot (grouped by trigger)
+        plot_inband_eff_grouped_by_trigger(
             eff_ad, eff_ht,
             signal_key="tt",
             signal_label=r"$t\bar{t}$",
-            title=r"In-band signal efficiency: $t\bar{t}$ (AD vs HT)",
             outpath=plots_dir / "inband_eff_ttbar_ad_vs_ht",
             run_label=run_label,
         )
 
-        # h->4b plot
-        plot_inband_eff_single_signal_ad_vs_ht(
+        # h->4b plot (grouped by trigger)
+        plot_inband_eff_grouped_by_trigger(
             eff_ad, eff_ht,
             signal_key="h_to_4b",
             signal_label=r"$h\rightarrow 4b$",
-            title=r"In-band signal efficiency: $h\rightarrow 4b$ (AD vs HT)",
             outpath=plots_dir / "inband_eff_h4b_ad_vs_ht",
             run_label=run_label,
         )

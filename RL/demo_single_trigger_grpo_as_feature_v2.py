@@ -642,7 +642,7 @@ def main():
         print_h5_tree(args.input, max_items=args.print_keys_max)
         raise SystemExit(0)
 
-    outdir = Path(args.outdir)
+    outdir = Path(args.outdir+"_"+args.control)
     outdir.mkdir(parents=True, exist_ok=True)
     plots_dir = outdir / "extra_plots"
     tables_dir = outdir / "tables"

@@ -245,7 +245,7 @@ def main():
                     help="Subsample stride for background only (bkg = bkg[::stride]).")
 
     # default latent dim sweep
-    ap.add_argument("--dims", type=int, nargs="+", default=[1, 2, 4, 8, 16])
+    ap.add_argument("--dims", type=int, nargs="+", default=[1, 2, 4, 6, 8, 16])
 
 
     ap.add_argument("--loss", choices=["mse", "masked"], default="mse")

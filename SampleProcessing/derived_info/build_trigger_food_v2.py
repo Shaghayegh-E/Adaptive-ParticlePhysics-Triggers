@@ -405,10 +405,10 @@ def main():
     # Default output names by control
     if args.out == "Data/Trigger_food_MC.h5" and args.control == "RealData":
         out = "Data/Trigger_food_Data.h5"
-        ae_path_string = "SampleProcessing/models/autoencoder_model_realdata_2.keras"
+        ae_path_string = f"SampleProcessing/models/autoencoder_model_realdata_{args.ae_dim}.keras"
     else:
         out = args.out
-        ae_path_string = "SampleProcessing/models/autoencoder_model_mc_2.keras"
+        ae_path_string = f"SampleProcessing/models/autoencoder_model_mc_{args.ae_dim}.keras"
 
     run_pipeline(
         control=args.control,

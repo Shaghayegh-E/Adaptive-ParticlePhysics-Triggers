@@ -47,8 +47,8 @@ from RL.utils import add_cms_header, save_png, print_h5_tree, read_any_h5, cumme
 from RL.grpo_agent import GRPOAgent, GRPOConfig, GRPORewardCfg #GRPO agent
 from RL.gfpo_agent import GFPOAgent, GFPOConfig
 from RL.dqn_agent import SeqDQNAgent, DQNConfig  # DQN agent
-from RL.dqn_agent import make_event_seq_as_v0, make_event_seq_ht_v0, shield_delta
-from RL.dqn_agent import make_event_seq_as, make_event_seq_ht
+# from RL.dqn_agent import make_event_seq_as_v0, make_event_seq_ht_v0
+from RL.dqn_agent import make_event_seq_as, make_event_seq_ht, shield_delta
 
 SEED = 20251221
 random.seed(SEED)
@@ -180,6 +180,81 @@ def _group_advantages_from_samples(samples, *, trigger, method,
 
     frac_vanish = (vanish_groups / max(1, total_groups))
     return adv_raw_all, adv_norm_all, adv_raw_exec, adv_norm_exec, frac_vanish
+
+def _make_edges(x, lo_q=0.5, hi_q=99.5, nbins=80):
+    x = np.asarray(x, dtype=np.float64)
+    x = x[np.isfinite(x)]
+    lo = float(np.percentile(x, lo_q))
+    hi = float(np.percentile(x, hi_q))
+    if not (hi > lo):
+        hi = lo + 1.0
+    return np.linspace(lo, hi, int(nbins) + 1)
+
+def _score_chunk_stats(x):
+    x = np.asarray(x, dtype=np.float64)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return dict(mean=np.nan, p05=np.nan, p50=np.nan, p95=np.nan)
+    return dict(
+        mean=float(np.mean(x)),
+        p05=float(np.percentile(x, 5)),
+        p50=float(np.percentile(x, 50)),
+        p95=float(np.percentile(x, 95)),
+    )
+
+def _plot_score_density_heatmap(time, hists, edges, *, title, outpath, run_label):
+    """
+    hists: shape (T, nbins) where nbins = len(edges)-1, density per chunk
+    edges: bin edges (len = nbins+1)
+    """
+    H = np.asarray(hists, dtype=np.float64)
+    if H.size == 0:
+        return
+
+    # transpose so y-axis is score
+    fig, ax = plt.subplots(figsize=(9.5, 5.8))
+    im = ax.imshow(
+        H.T,
+        origin="lower",
+        aspect="auto",
+        extent=[float(time[0]), float(time[-1]), float(edges[0]), float(edges[-1])],
+        interpolation="nearest",
+    )
+    ax.set_xlabel("Time (Fraction of Run)")
+    ax.set_ylabel("Score")
+    ax.set_title(title)
+    ax.grid(False)
+    fig.colorbar(im, ax=ax, label="Density")
+    add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
+    save_png(fig, str(outpath))
+    plt.close(fig)
+
+def _plot_score_summary(time, stats_list, *, title, outpath, run_label):
+    """
+    stats_list: list of dicts with keys mean, p05, p50, p95 (one per chunk)
+    """
+    if not stats_list:
+        return
+    mean = np.array([s["mean"] for s in stats_list], dtype=np.float64)
+    p05  = np.array([s["p05"]  for s in stats_list], dtype=np.float64)
+    p50  = np.array([s["p50"]  for s in stats_list], dtype=np.float64)
+    p95  = np.array([s["p95"]  for s in stats_list], dtype=np.float64)
+
+    fig, ax = plt.subplots(figsize=(9.5, 5.2))
+    ax.plot(time, mean, linewidth=2.2, label="Mean")
+    ax.plot(time, p50,  linewidth=2.2, linestyle="--", label="Median (p50)")
+    ax.fill_between(time, p05, p95, alpha=0.15, label="p05–p95 band")
+    ax.set_xlabel("Time (Fraction of Run)")
+    ax.set_ylabel("Score")
+    ax.set_title(title)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True)
+    add_cms_header(fig, run_label=run_label)
+    finalize_diag_fig(fig)
+    save_png(fig, str(outpath))
+    plt.close(fig)
+
 def _plot_adv_compare_ecdf(x_grpo, x_gfpo, *, title, outpath, run_label):
     x_grpo = np.asarray(x_grpo, dtype=np.float64); x_grpo = x_grpo[np.isfinite(x_grpo)]
     x_gfpo = np.asarray(x_gfpo, dtype=np.float64); x_gfpo = x_gfpo[np.isfinite(x_gfpo)]
@@ -844,11 +919,11 @@ def main():
     ap = argparse.ArgumentParser()
 
     ap.add_argument("--input", default="Data/Trigger_food_MC.h5",
-                    choices=["Data/Trigger_food_MC.h5", "Data/Matched_data_2016_dim2.h5"])
+                    choices=["Data/Trigger_food_MC.h5", "Data/Matched_data_2016_dim2.h5", "Data/Trigger_food_MC_ablation_4.h5", "Data/Trigger_food_MC_ablation_6.h5", "Data/Trigger_food_MC_ablation_8.h5", "Data/Trigger_food_MC_ablation_10.h5", "Data/Trigger_food_MC_ablation_12.h5", "Data/Trigger_food_MC_ablation_14.h5", "Data/Trigger_food_MC_ablation_16.h5"])
     ap.add_argument("--outdir", default="outputs/demo_sing_grpo_as_feature")
     ap.add_argument("--control", default="MC", choices=["MC", "RealData"])
     ap.add_argument("--score-dim-hint", type=int, default=2)
-    ap.add_argument("--as-dim", type=int, default=2, choices=[1, 2, 4])
+    ap.add_argument("--as-dim", type=int, default=2, choices=[1, 2, 4, 6, 8, 10, 12, 14, 16])
 
     ap.add_argument("--as-deltas", type=str, default="-3,-1.5,0,1.5,3")
     ap.add_argument("--as-step", type=float, default=0.5)
@@ -908,10 +983,11 @@ def main():
 
 
     # GFPO (Greedy Feasible Policy Optimization) baseline
-    ap.add_argument("--gfpo-filter", type=str, default="abs_err_topk", choices=["abs_err_topk", "feasible_first_sig"]
+    ap.add_argument("--gfpo-filter", type=str, default="abs_err_topk", choices=["abs_err_topk", "feasible_first_sig", "both"]
                     , help="abs_err_topk: pick the top-K candidates with the smallest |bg_after - target|, " \
-                        "feasible_first_sig   : feasible-first (|bg-target|<=feas_mult*tol), "
-                        "then rank by mix*tt+(1-mix)*aa; pad with closest if needed")
+                        "feasible_first_sig   : feasible-first (|bg-target|<=feas_mult*tol), " \
+                        "then rank by mix*tt+(1-mix)*aa; pad with closest if needed" \
+                            "both=runs both.")
     ap.add_argument("--group-size-keep", type=int, default=16, choices=[16, 32]) 
     ap.add_argument("--group-size-sample", type=int, default=32)
     ap.add_argument("--no-gfpo", action="store_true", help="disable GFPO baseline")
@@ -925,13 +1001,19 @@ def main():
     target = float(args.target)
     use_gfpo = (not args.no_gfpo)
 
-    # --- append gfpo filter to outdir (so runs don't overwrite for GFPO!) ---
-    suffix = args.gfpo_filter if use_gfpo else "nogfpo"
+    if args.gfpo_filter == "both":
+        GFPO_VARIANTS = [("GFPO-F", "abs_err_topk"), ("GFPO-FR", "feasible_first_sig")]
+    else:
+        # single baseline run
+        name = "GFPO-F" if args.gfpo_filter == "abs_err_topk" else "GFPO-FR"
+        GFPO_VARIANTS = [(name, args.gfpo_filter)]
+
+    # --- append gfpo filter to outdir (so runs don't overwrite for GFPO) ---
+    suffix = "gfpoF_FR" if (use_gfpo and args.gfpo_filter == "both") else (args.gfpo_filter if use_gfpo else "nogfpo")
     outdir_str = str(args.outdir)
     if not outdir_str.endswith(f"_{suffix}"):
-        args.outdir = f"{outdir_str}_{suffix}"
+        args.outdir = f"{outdir_str}_{suffix}_{args.control}"
     # ------------------------------------------------------------- 
-
 
     if args.group_size_sample < args.group_size_keep: #sample >= keep
         raise SystemExit("--gfpo-keep-size must be <= --gfpo-sample-size")
@@ -959,12 +1041,27 @@ def main():
         raise SystemExit("HT arrays missing: need Bht/Tht/Aht in the input file.")
 
     # choose AS
-    if args.as_dim == 2:
-        Bas, Tas, Aas = d["Bas2"], d["Tas2"], d["Aas2"]
-    elif args.as_dim == 1:
+    if args.as_dim == 1:
         Bas, Tas, Aas = d["Bas1"], d["Tas1"], d["Aas1"]
-    else:
+    elif args.as_dim == 2:
+        Bas, Tas, Aas = d["Bas2"], d["Tas2"], d["Aas2"]
+    elif args.as_dim == 4:
         Bas, Tas, Aas = d["Bas4"], d["Tas4"], d["Aas4"]
+    elif args.as_dim == 6:
+        Bas, Tas, Aas = d["Bas6"], d["Tas6"], d["Aas6"]
+    elif args.as_dim == 8:
+        Bas, Tas, Aas = d["Bas8"], d["Tas8"], d["Aas8"]
+    elif args.as_dim == 10:
+        Bas, Tas, Aas = d["Bas10"], d["Tas10"], d["Aas10"]
+    elif args.as_dim == 12:
+        Bas, Tas, Aas = d["Bas12"], d["Tas12"], d["Aas12"]
+    elif args.as_dim == 14:
+        Bas, Tas, Aas = d["Bas14"], d["Tas14"], d["Aas14"]
+    elif args.as_dim == 16:
+        Bas, Tas, Aas = d["Bas16"], d["Tas16"], d["Aas16"]
+    else:
+        raise SystemExit("Unsupported --as-dim")
+
 
     if Bas is None or Tas is None or Aas is None:
         raise SystemExit("AS arrays missing for requested --as-dim.")
@@ -1374,6 +1471,16 @@ def main():
     # GFPO
     micro_counter_gfpo = 0
     micro_global = 0    # optional: single timeline across AS+HT micro-steps
+
+    # ---- score distribution tracking (chunk-level) ----
+    as_edges = _make_edges(Bas[start_event:], lo_q=0.5, hi_q=99.5, nbins=90)
+    as_hists = []
+    as_stats = []
+
+    if args.run_ht:
+        ht_edges = _make_edges(Bht[start_event:], lo_q=0.5, hi_q=99.5, nbins=90)
+        ht_hists = []
+        ht_stats = []
 
     for t, I in enumerate(batch_starts):
         end = min(I + chunk_size, N, len(Bnpv))
@@ -2510,6 +2617,11 @@ def main():
 
         tt_gfpo = Sing_Trigger(sas_tt, AS_cut_gfpo)
         aa_gfpo = Sing_Trigger(sas_aa, AS_cut_gfpo)
+        
+        # AD/AS score distribution for this chunk
+        h_as, _ = np.histogram(bas, bins=as_edges, density=True)
+        as_hists.append(h_as)
+        as_stats.append(_score_chunk_stats(bas))
 
         # --- append AD logs ---
         R_const_pct.append(bg_const)
@@ -2576,6 +2688,10 @@ def main():
             bg_ht_gfpo = Sing_Trigger(bht, Ht_cut_gfpo)
             tt_ht_gfpo = Sing_Trigger(sht_tt, Ht_cut_gfpo)
             aa_ht_gfpo = Sing_Trigger(sht_aa, Ht_cut_gfpo)
+
+            h_ht, _ = np.histogram(bht, bins=ht_edges, density=True)
+            ht_hists.append(h_ht)
+            ht_stats.append(_score_chunk_stats(bht))
 
             R_ht_const_pct.append(bg_ht_const)
             R_ht_pd_pct.append(bg_ht_pd)
@@ -2658,6 +2774,23 @@ def main():
 
     time = np.linspace(0, 1, len(R_const_pct))
 
+    # ---- score distribution plots (time-chunk stacked) ----
+    _plot_score_density_heatmap(
+    time=time,
+    hists=as_hists,
+    edges=as_edges,
+    title="AD score distribution across time chunks (background Bas)",
+    outpath=plots_dir / "score_density_AS_bg",
+    run_label=run_label,
+    )
+    _plot_score_summary(
+    time=time,
+    stats_list=as_stats,
+    title="AD score",
+    outpath=plots_dir / "score_summary_AS_bg",
+    run_label=run_label,
+    )
+
     # HT time and kHz
     if args.run_ht: 
         time_ht = np.linspace(0, 1, len(R_ht_const_pct))
@@ -2667,6 +2800,22 @@ def main():
         R_ht_grpo_khz  = R_ht_grpo_pct  * RATE_SCALE_KHZ
 
         R_ht_gfpo_khz = R_ht_gfpo_pct * RATE_SCALE_KHZ
+
+        _plot_score_density_heatmap(
+        time=time,  # same chunk index timeline
+        hists=ht_hists,
+        edges=ht_edges,
+        title="HT score distribution across time chunks (background Bht)",
+        outpath=plots_dir / "score_density_HT_bg",
+        run_label=run_label,
+        )
+        _plot_score_summary(
+        time=time,
+        stats_list=ht_stats,
+        title="HT score",
+        outpath=plots_dir / "score_summary_HT_bg",
+        run_label=run_label,
+        )
 
 
     # kHz for plots AS

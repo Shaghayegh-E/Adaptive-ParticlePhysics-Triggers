@@ -236,13 +236,13 @@ def write_adt_table(rows, tex_path, caption, label):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", default="Data/Trigger_food_MC.h5",
-                    choices=["Data/Trigger_food_MC.h5", "Data/Matched_data_2016_dim2.h5"])
+                    choices=["Data/Trigger_food_MC.h5", "Data/Matched_data_2016_dim2.h5", "Data/Trigger_food_MC_ablation_4.h5", "Data/Trigger_food_MC_ablation_6.h5", "Data/Trigger_food_MC_ablation_8.h5", "Data/Trigger_food_MC_ablation_10.h5", "Data/Trigger_food_MC_ablation_12.h5", "Data/Trigger_food_MC_ablation_14.h5", "Data/Trigger_food_MC_ablation_16.h5"])
     ap.add_argument("--outdir", default="outputs/demo_sing_adt_feature", help="output dir")
     ap.add_argument("--control", default="MC", choices=["MC", "RealData"],
                     help="Control type: MC or RealData")
     ap.add_argument("--score-dim-hint", type=int, default=2,
                     help="If file has only scoreXX, use this dim (e.g. 2 -> score02).")
-    ap.add_argument("--as-dim", type=int, default=2, choices=[1, 2, 4],
+    ap.add_argument("--as-dim", type=int, default=2, choices=[1, 2, 4, 6, 8, 10, 12, 14, 16],
                     help="Which AS dimension to use (1->score01, 2->score02, 4->score04).")
 
     ap.add_argument("--print-keys", action="store_true")
@@ -287,7 +287,7 @@ def main():
         print_h5_tree(args.input, max_items=args.print_keys_max)
         raise SystemExit(0)
 
-    outdir = Path(args.outdir)
+    outdir = Path(args.outdir+"_"+args.control)
     outdir.mkdir(parents=True, exist_ok=True)
 
     d = read_any_h5(args.input, score_dim_hint=args.score_dim_hint)
@@ -297,13 +297,12 @@ def main():
     Tht, Tnpv = d["Tht"], d["Tnpv"]
     Aht, Anpv = d["Aht"], d["Anpv"]
 
-    # Pick AS dim
-    if args.as_dim == 1:
-        Bas, Tas, Aas = d.get("Bas1"), d.get("Tas1"), d.get("Aas1")
-    elif args.as_dim == 2:
-        Bas, Tas, Aas = d.get("Bas2"), d.get("Tas2"), d.get("Aas2")
-    else:
-        Bas, Tas, Aas = d.get("Bas4"), d.get("Tas4"), d.get("Aas4")
+    # Pick AS dim (expects keys like Bas2/Tas2/Aas2, Bas4/Tas4/Aas4, ...)
+    dim = int(args.as_dim)
+
+    Bas = d.get(f"Bas{dim}")
+    Tas = d.get(f"Tas{dim}")
+    Aas = d.get(f"Aas{dim}")
 
     if Bas is None or Tas is None or Aas is None:
         raise SystemExit("AS arrays missing for requested --as-dim. Check your input file keys.")

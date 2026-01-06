@@ -7,11 +7,15 @@
 Data/*.h5
 Data/**/*.h5
 Data/python/*
+Data/*.pdf
+Data/*.png
+Data/python/
 # === Outputs / Plots ===
 runs/
 results/
 figs/
 *.pdf
+outputs/
 
 # === Temporary / Cache ===
 __pycache__/
@@ -54,3 +58,8 @@ env/
 
 # Large numpy results
 *.npz
+
+Data_SingleTrigger.py
+Run_SingleTrigger.py
+
+RL/
